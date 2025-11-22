@@ -3,60 +3,55 @@ package main
 import (
 	"log"
 	"os"
-	"student-achievement-backend/app/repository" // Import folder repository
-	"student-achievement-backend/app/service"    // Import folder service
-	"student-achievement-backend/database"       // Import folder database
-	"student-achievement-backend/routes"         // Import folder routes
+	"student-achievement-backend/app/repository"
+	"student-achievement-backend/app/service"
+	"student-achievement-backend/database"
+	"student-achievement-backend/routes"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// 1. Load Konfigurasi Environment (.env)
-	// Ini wajib dilakukan paling awal agar aplikasi bisa baca password DB dll.
+	// ... (Kode Load Env dan InitDB SAMA SEPERTI SEBELUMNYA) ...
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-
-	// 2. Inisialisasi Koneksi Database (PostgreSQL & MongoDB)
-	// Fungsi InitDB ini kita ambil dari file database/connection.go
 	dbConnection, err := database.InitDB()
 	if err != nil {
 		log.Fatalf("Gagal menginisialisasi database: %v", err)
 	}
 
 	// ==============================================================
-	// DEPENDENCY INJECTION (PERAKITAN LAYER)
-	// Urutan Rakit: Database -> Repository -> Service -> Handler
+	// DEPENDENCY INJECTION
 	// ==============================================================
 
-	// TAHAP A: Setup Repository (Si Pengambil Data)
-	// User Repository butuh koneksi Postgres
+	// 1. Repository
 	userRepo := repository.NewUserRepository(dbConnection.Postgres)
+	// UPDATE BARU: Tambahkan Achievement Repository
+	achievementRepo := repository.NewAchievementRepository(dbConnection.Postgres, dbConnection.Mongo)
 
-	// TAHAP B: Setup Service (Si Otak Bisnis)
-	// Auth Service butuh User Repository agar bisa cek data user
+	// 2. Service
 	authService := service.NewAuthService(userRepo)
+	// UPDATE BARU: Tambahkan Achievement Service
+	achievementService := service.NewAchievementService(achievementRepo)
 
-	// TAHAP C: Setup Handler/Routes (Si Resepsionis)
-	// Auth Handler butuh Auth Service untuk memproses logika
+	// 3. Handler
 	authHandler := routes.NewAuthHandler(authService)
+	// UPDATE BARU: Tambahkan Achievement Handler
+	achievementHandler := routes.NewAchievementHandler(achievementService)
 
 	// ==============================================================
-	// SETUP WEB SERVER (GIN)
+	// SERVER SETUP
 	// ==============================================================
-
-	// 3. Buat Mesin Server Gin (Default sudah ada Logger & Recovery)
 	r := gin.Default()
 
-	// 4. Daftarkan Rute (Routes) yang sudah kita buat
-	// Ini akan mengaktifkan URL seperti /api/v1/auth/login
+	// Setup Routes
 	authHandler.SetupAuthRoutes(r)
+	// UPDATE BARU: Daftarkan rute prestasi
+	achievementHandler.SetupAchievementRoutes(r)
 
-	// 5. Endpoint Cek Kesehatan Server (Ping)
-	// Gunanya cuma buat memastikan server nyala atau tidak di browser
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"message": "Student Achievement API Server is RUNNING!",
@@ -64,16 +59,12 @@ func main() {
 		})
 	})
 
-	// 6. Jalankan Server
-	// Ambil port dari .env (APP_PORT=8080)
+	// ... (Kode Menjalankan Server SAMA SEPERTI SEBELUMNYA) ...
 	appPort := os.Getenv("APP_PORT")
 	if appPort == "" {
-		appPort = "8080" // Default port kalau di .env kosong
+		appPort = "8080"
 	}
-
 	log.Println("Server berjalan di http://localhost:" + appPort)
-	
-	// r.Run akan menahan program agar terus berjalan (Looping)
 	if err := r.Run(":" + appPort); err != nil {
 		log.Fatalf("Gagal menjalankan server: %v", err)
 	}
