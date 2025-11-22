@@ -14,6 +14,7 @@ import (
 type AchievementService interface {
 	SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error
 	SubmitForVerification(ctx context.Context, achievementID string, userID string) error
+	DeleteAchievement(ctx context.Context, achievementID string, userID string) error
 }
 
 // achievementService struct
@@ -56,7 +57,7 @@ func (s *achievementService) SubmitAchievement(ctx context.Context, studentID st
 	return s.achievementRepo.Create(ctx, pgData, mongoData)
 }
 
-// [UPDATE BARU] Implementasi Logika Submit Verification (FR-004)
+// Implementasi Logika Submit Verification (FR-004)
 func (s *achievementService) SubmitForVerification(ctx context.Context, achievementID string, userID string) error {
 	// 1. Cari data prestasi berdasarkan ID
 	achievement, err := s.achievementRepo.FindByID(achievementID)
@@ -89,4 +90,28 @@ func (s *achievementService) SubmitForVerification(ctx context.Context, achievem
 	}
 
 	return nil
+}
+
+// [UPDATE BARU] Implementasi DeleteAchievement (FR-005)
+func (s *achievementService) DeleteAchievement(ctx context.Context, achievementID string, userID string) error {
+    // 1. Cari data prestasi dulu
+    achievement, err := s.achievementRepo.FindByID(achievementID)
+    if err != nil {
+        return errors.New("prestasi tidak ditemukan")
+    }
+
+    // 2. Validasi Kepemilikan (Authorization)
+    // Cek apakah yang mau menghapus adalah pemilik datanya
+    if achievement.StudentID.String() != userID {
+        return errors.New("anda tidak berhak menghapus prestasi ini")
+    }
+
+    // 3. Validasi Status (Precondition)
+    // Sesuai SRS FR-005: Precondition Status 'draft' [cite: 201]
+    if achievement.Status != "draft" {
+        return errors.New("prestasi tidak bisa dihapus karena sudah disubmit atau diverifikasi")
+    }
+
+    // 4. Panggil Repository untuk hapus permanen
+    return s.achievementRepo.Delete(ctx, achievementID)
 }

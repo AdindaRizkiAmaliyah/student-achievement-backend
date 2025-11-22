@@ -14,6 +14,7 @@ type AchievementRepository interface {
 	Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error
 	FindByID(id string) (*model.AchievementReference, error)
 	UpdateStatus(id string, status string) error
+	Delete(ctx context.Context, id string) error
 }
 
 // achievementRepository struct implementasi
@@ -68,7 +69,7 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 	return tx.Commit().Error
 }
 
-// [UPDATE BARU] Implementasi FindByID
+// Implementasi FindByID
 func (r *achievementRepository) FindByID(id string) (*model.AchievementReference, error) {
 	var achievement model.AchievementReference
 	// Cari data di tabel PostgreSQL berdasarkan Primary Key (ID)
@@ -79,10 +80,45 @@ func (r *achievementRepository) FindByID(id string) (*model.AchievementReference
 	return &achievement, nil
 }
 
-// [UPDATE BARU] Implementasi UpdateStatus
+// Implementasi UpdateStatus
 func (r *achievementRepository) UpdateStatus(id string, status string) error {
 	// Update kolom 'status' pada tabel achievement_references dimana id cocok
 	return r.pgDB.Model(&model.AchievementReference{}).
 		Where("id = ?", id).
 		Update("status", status).Error
+}
+
+// [UPDATE BARU] Implementasi Delete 
+func (r *achievementRepository) Delete(ctx context.Context, id string) error {
+    // 1. Cari dulu data referensinya di Postgres untuk dapat MongoAchievementID
+    var achievement model.AchievementReference
+    if err := r.pgDB.Where("id = ?", id).First(&achievement).Error; err != nil {
+        return err
+    }
+
+    // 2. Mulai Transaksi
+    tx := r.pgDB.Begin()
+    if tx.Error != nil {
+        return tx.Error
+    }
+
+    // 3. Hapus data di PostgreSQL
+    if err := tx.Delete(&achievement).Error; err != nil {
+        tx.Rollback()
+        return err
+    }
+
+    // 4. Hapus data di MongoDB
+    // Kita gunakan MongoAchievementID yang kita dapat dari Postgres tadi
+    objID, _ := primitive.ObjectIDFromHex(achievement.MongoAchievementID)
+    collection := r.mongoDB.Collection("achievements")
+    _, err := collection.DeleteOne(ctx, map[string]interface{}{"_id": objID})
+    
+    if err != nil {
+        tx.Rollback() // Batalkan hapus Postgres jika Mongo gagal
+        return err
+    }
+
+    // 5. Commit Transaksi
+    return tx.Commit().Error
 }

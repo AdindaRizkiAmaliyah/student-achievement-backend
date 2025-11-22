@@ -39,6 +39,7 @@ func (h *AchievementHandler) SetupAchievementRoutes(r *gin.Engine) {
 		// achievementGroup.POST("/", middleware.PermissionMiddleware("achievement:create"), h.Create)
 		achievementGroup.POST("/", h.Create)
 		achievementGroup.POST("/:id/submit", h.SubmitForVerification)
+		achievementGroup.DELETE("/:id", h.Delete)
 	}
 }
 
@@ -146,7 +147,7 @@ func (h *AchievementHandler) Create(ctx *gin.Context) {
 	ctx.JSON(http.StatusCreated, resp)
 }
 
-// [UPDATE BARU] Handler untuk Submit Verifikasi
+// Handler untuk Submit Verifikasi
 func (h *AchievementHandler) SubmitForVerification(ctx *gin.Context) {
 	// 1. Ambil ID Prestasi dari URL (misal: /achievements/123/submit -> id=123)
 	achievementID := ctx.Param("id")
@@ -172,4 +173,29 @@ func (h *AchievementHandler) SubmitForVerification(ctx *gin.Context) {
 	// 4. Sukses
 	resp := utils.BuildResponseSuccess("Prestasi berhasil disubmit untuk verifikasi", nil)
 	ctx.JSON(http.StatusOK, resp)
+}
+
+// [UPDATE BARU] Handler Delete Prestasi
+func (h *AchievementHandler) Delete(ctx *gin.Context) {
+    // 1. Ambil ID Prestasi dari URL
+    achievementID := ctx.Param("id")
+
+    // 2. Ambil UserID dari Token
+    userIDInterface, exists := ctx.Get("userID")
+    if !exists {
+        ctx.JSON(http.StatusUnauthorized, utils.BuildResponseFailed("Unauthorized", "User ID not found", nil))
+        return
+    }
+    userID := userIDInterface.(uuid.UUID)
+
+    // 3. Panggil Service
+    err := h.achievementService.DeleteAchievement(ctx, achievementID, userID.String())
+    if err != nil {
+        // Bisa error karena tidak ketemu, bukan pemilik, atau status bukan draft
+        ctx.JSON(http.StatusBadRequest, utils.BuildResponseFailed("Gagal menghapus prestasi", err.Error(), nil))
+        return
+    }
+
+    // 4. Sukses
+    ctx.JSON(http.StatusOK, utils.BuildResponseSuccess("Prestasi berhasil dihapus", nil))
 }
