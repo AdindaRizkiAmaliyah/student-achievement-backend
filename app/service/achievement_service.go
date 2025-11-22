@@ -5,47 +5,51 @@ import (
 	"student-achievement-backend/app/model"
 	"student-achievement-backend/app/repository"
 	"time"
+
+	"github.com/google/uuid" // Jangan lupa import ini untuk parsing UUID
 )
 
-// Interface AchievementService
+// AchievementService interface
 type AchievementService interface {
 	SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error
 }
 
+// achievementService struct
 type achievementService struct {
 	achievementRepo repository.AchievementRepository
 }
 
+// NewAchievementService constructor
 func NewAchievementService(achievementRepo repository.AchievementRepository) AchievementService {
 	return &achievementService{
 		achievementRepo: achievementRepo,
 	}
 }
 
-// SubmitAchievement: Logika mahasiswa melaporkan prestasi baru [cite: 178]
+// SubmitAchievement logika bisnis pelaporan prestasi
 func (s *achievementService) SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error {
 	
-	// 1. Set Default Values (Aturan Bisnis)
+	// --- [PERBAIKAN UTAMA] ---
+	// Konversi studentID (string dari token) menjadi UUID (format database)
+	uid, err := uuid.Parse(studentID)
+	if err == nil {
+		// Masukkan UUID yang valid ke struct data
+		pgData.StudentID = uid
+		mongoData.StudentID = uid
+	}
+	// -------------------------
+
+	// 1. Set Default Values sesuai Aturan Bisnis SRS
+	pgData.Status = "draft" // Status awal wajib draft
 	
-	// Status awal harus selalu 'draft' saat baru dibuat [cite: 185]
-	pgData.Status = "draft" 
-	
-	// Isi waktu created_at otomatis jika belum ada
+	// Isi timestamp otomatis
 	now := time.Now()
 	pgData.CreatedAt = now
 	pgData.UpdatedAt = now
 	mongoData.CreatedAt = now
 	mongoData.UpdatedAt = now
 
-	// Pastikan data Mongo punya StudentID yang sesuai (Sinkronisasi data)
-	// (Di sini kita asumsikan ID Mahasiswa valid, validasi lengkap biasanya di controller)
-	
-	// 2. Panggil Repository untuk melakukan transaksi penyimpanan
-	// Repository akan mengurus penyimpanan ke Mongo dulu, baru ke Postgres.
-	err := s.achievementRepo.Create(ctx, pgData, mongoData)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// 2. Panggil Repository
+	// Data pgData sekarang sudah berisi StudentID yang benar dan MongoAchievementID akan diisi di repo
+	return s.achievementRepo.Create(ctx, pgData, mongoData)
 }

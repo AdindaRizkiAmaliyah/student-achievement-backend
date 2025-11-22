@@ -4,25 +4,23 @@ import (
 	"context"
 	"student-achievement-backend/app/model"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gorm.io/gorm"
 )
 
-// Interface kontrak untuk Achievement
+// AchievementRepository adalah kontrak interface
 type AchievementRepository interface {
-	// Create menerima dua jenis data:
-	// 1. pgData: Data ringkas untuk tabel referensi di PostgreSQL (status, tanggal, id mahasiswa)
-	// 2. mongoData: Data detail prestasi yang dinamis (judul, lomba, ranking, dll)
 	Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error
 }
 
-// Struct ini menyimpan dua koneksi database sekaligus!
+// achievementRepository struct implementasi
 type achievementRepository struct {
-	pgDB    *gorm.DB        // Koneksi ke Postgres
-	mongoDB *mongo.Database // Koneksi ke Mongo
+	pgDB    *gorm.DB
+	mongoDB *mongo.Database
 }
 
-// Constructor
+// NewAchievementRepository constructor
 func NewAchievementRepository(pgDB *gorm.DB, mongoDB *mongo.Database) AchievementRepository {
 	return &achievementRepository{
 		pgDB:    pgDB,
@@ -30,46 +28,40 @@ func NewAchievementRepository(pgDB *gorm.DB, mongoDB *mongo.Database) Achievemen
 	}
 }
 
-// Create menjalankan logika "Hybrid Database" sesuai SRS
+// Create menyimpan data ke MongoDB dan PostgreSQL dalam satu transaksi logis
 func (r *achievementRepository) Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error {
 	
-	// LANGKAH 1: Mulai Transaksi PostgreSQL.
-	// "Transaction" artinya: Kalau nanti di tengah jalan ada error, semua perubahan dibatalkan.
+	// 1. Mulai Transaksi PostgreSQL (untuk keamanan data)
 	tx := r.pgDB.Begin()
 	if tx.Error != nil {
 		return tx.Error
 	}
 
-	// LANGKAH 2: Simpan data detail ke MongoDB dulu.
-	// Kita pilih collection "achievements".
+	// 2. Simpan Detail ke MongoDB
 	collection := r.mongoDB.Collection("achievements")
-	
-	// InsertOne perintah untuk menyimpan dokumen JSON ke Mongo.
 	insertResult, err := collection.InsertOne(ctx, mongoData)
 	if err != nil {
-		// Jika gagal simpan ke Mongo, batalkan transaksi Postgres (Rollback).
-		tx.Rollback()
+		tx.Rollback() // Batalkan transaksi Postgres jika Mongo gagal
 		return err
 	}
 
-	// Update ID di data postgres dengan ID asli dari MongoDB yang baru dibuat.
-	// Ini kunci penghubung antara Postgres dan Mongo!
-	// (Asumsi: mongoData._id sudah di-set atau kita ambil dari insertResult)
-	// Di sini kita biarkan sesuai input, tapi pastikan service mengirim ID yang sinkron.
+	// --- [PERBAIKAN UTAMA] ---
+	// Ambil ID unik yang baru saja dibuat oleh MongoDB (ObjectID)
+	// Lalu konversi jadi string dan masukkan ke struct Postgres
+	if oid, ok := insertResult.InsertedID.(primitive.ObjectID); ok {
+		pgData.MongoAchievementID = oid.Hex()
+	}
+	// -------------------------
 
-	// LANGKAH 3: Simpan data referensi ke PostgreSQL.
-	// tx.Create artinya kita pakai koneksi transaksi, bukan koneksi biasa.
+	// 3. Simpan Referensi ke PostgreSQL
 	if err := tx.Create(pgData).Error; err != nil {
-		// BAHAYA: Jika simpan ke Postgres gagal, data di Mongo sudah terlanjur masuk!
-		// Kita harus menghapusnya manual (Kompensasi) agar data bersih.
+		// Jika simpan ke Postgres gagal, kita harus hapus data yang terlanjur masuk ke Mongo
 		collection.DeleteOne(ctx, map[string]interface{}{"_id": insertResult.InsertedID})
 		
-		// Dan jangan lupa batalkan transaksi Postgres.
-		tx.Rollback()
+		tx.Rollback() // Batalkan transaksi
 		return err
 	}
 
-	// LANGKAH 4: Jika semua sukses, "Commit" transaksi.
-	// Data baru benar-benar permanen tersimpan di Postgres setelah baris ini.
+	// 4. Commit (Simpan Permanen)
 	return tx.Commit().Error
 }
