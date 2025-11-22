@@ -50,7 +50,8 @@ type Student struct {
 	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	UserID       uuid.UUID `gorm:"type:uuid;not null" json:"userId"`
 	User         User      `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	StudentID    string    `gorm:"type:varchar(20);unique;not null" json:"studentId"` // NIM
+	// Kita tambahkan 'column:student_id' secara eksplisit agar GORM tidak bingung
+	StudentID    string    `gorm:"column:student_id;type:varchar(20);unique;not null" json:"studentId"`
 	ProgramStudy string    `gorm:"type:varchar(100)" json:"programStudy"`
 	AcademicYear string    `gorm:"type:varchar(10)" json:"academicYear"`
 	AdvisorID    uuid.UUID `gorm:"type:uuid" json:"advisorId"`
