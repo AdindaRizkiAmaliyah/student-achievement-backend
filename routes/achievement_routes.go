@@ -40,6 +40,7 @@ func (h *AchievementHandler) SetupAchievementRoutes(r *gin.Engine) {
 		achievementGroup.POST("/", h.Create)
 		achievementGroup.POST("/:id/submit", h.SubmitForVerification)
 		achievementGroup.DELETE("/:id", h.Delete)
+		achievementGroup.GET("/", h.GetList)
 	}
 }
 
@@ -198,4 +199,25 @@ func (h *AchievementHandler) Delete(ctx *gin.Context) {
 
     // 4. Sukses
     ctx.JSON(http.StatusOK, utils.BuildResponseSuccess("Prestasi berhasil dihapus", nil))
+}
+
+// [UPDATE BARU] Handler Get List
+func (h *AchievementHandler) GetList(ctx *gin.Context) {
+	// 1. Ambil UserID dari Token
+	userIDInterface, exists := ctx.Get("userID")
+	if !exists {
+		ctx.JSON(http.StatusUnauthorized, utils.BuildResponseFailed("Unauthorized", "User ID not found", nil))
+		return
+	}
+	userID := userIDInterface.(uuid.UUID)
+
+	// 2. Panggil Service
+	achievements, err := h.achievementService.GetAchievementsByStudent(ctx, userID.String())
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.BuildResponseFailed("Gagal mengambil data prestasi", err.Error(), nil))
+		return
+	}
+
+	// 3. Sukses
+	ctx.JSON(http.StatusOK, utils.BuildResponseSuccess("Berhasil mengambil daftar prestasi", achievements))
 }

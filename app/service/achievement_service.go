@@ -15,6 +15,9 @@ type AchievementService interface {
 	SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error
 	SubmitForVerification(ctx context.Context, achievementID string, userID string) error
 	DeleteAchievement(ctx context.Context, achievementID string, userID string) error
+	// [UPDATE BARU] Fungsi Get List
+	// Returnnya interface{} agar kita bisa bikin struktur custom (gabungan)
+	GetAchievementsByStudent(ctx context.Context, userID string) ([]map[string]interface{}, error)
 }
 
 // achievementService struct
@@ -114,4 +117,46 @@ func (s *achievementService) DeleteAchievement(ctx context.Context, achievementI
 
     // 4. Panggil Repository untuk hapus permanen
     return s.achievementRepo.Delete(ctx, achievementID)
+}
+
+// [UPDATE BARU] Implementasi Get List
+func (s *achievementService) GetAchievementsByStudent(ctx context.Context, userID string) ([]map[string]interface{}, error) {
+	// 1. Ambil daftar referensi dari PostgreSQL (Status, ID, Tanggal)
+	pgDataList, err := s.achievementRepo.FindByStudentID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Siapkan wadah untuk hasil gabungan
+	var result []map[string]interface{}
+
+	// 3. Looping setiap data dari Postgres
+	for _, pgItem := range pgDataList {
+		// Ambil detail (Judul) dari MongoDB berdasarkan ID yang tersimpan di Postgres
+		mongoDetail, err := s.achievementRepo.FindDetailByMongoID(ctx, pgItem.MongoAchievementID)
+		
+		title := "Data Corrupt/Missing"
+		achievementType := "Unknown"
+		
+		// Jika data di Mongo ketemu, ambil Judul aslinya
+		if err == nil {
+			title = mongoDetail.Title
+			achievementType = mongoDetail.AchievementType
+		}
+
+		// 4. Rakit data gabungan untuk dikirim ke Frontend
+		combinedData := map[string]interface{}{
+			"id":          pgItem.ID,         // ID untuk Edit/Delete
+			"title":       title,             // Dari Mongo
+			"type":        achievementType,   // Dari Mongo
+			"status":      pgItem.Status,     // Dari Postgres
+			"points":      mongoDetail.Points,// Dari Mongo
+			"created_at":  pgItem.CreatedAt,
+			"submitted_at": pgItem.SubmittedAt,
+		}
+
+		result = append(result, combinedData)
+	}
+
+	return result, nil
 }

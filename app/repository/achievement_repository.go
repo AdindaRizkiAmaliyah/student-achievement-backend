@@ -15,6 +15,10 @@ type AchievementRepository interface {
 	FindByID(id string) (*model.AchievementReference, error)
 	UpdateStatus(id string, status string) error
 	Delete(ctx context.Context, id string) error
+	// [UPDATE BARU] Ambil semua referensi milik satu mahasiswa
+	FindByStudentID(studentID string) ([]model.AchievementReference, error)
+    // [UPDATE BARU] Ambil detail Mongo berdasarkan ID (sudah ada FindByID di repo? belum untuk Mongo)
+    FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error)
 }
 
 // achievementRepository struct implementasi
@@ -121,4 +125,28 @@ func (r *achievementRepository) Delete(ctx context.Context, id string) error {
 
     // 5. Commit Transaksi
     return tx.Commit().Error
+}
+
+// [UPDATE BARU] Implementasi FindByStudentID (Postgres)
+func (r *achievementRepository) FindByStudentID(studentID string) ([]model.AchievementReference, error) {
+	var achievements []model.AchievementReference
+	// Cari semua data where student_id = ?
+	err := r.pgDB.Where("student_id = ?", studentID).Find(&achievements).Error
+	if err != nil {
+		return nil, err
+	}
+	return achievements, nil
+}
+
+// [UPDATE BARU] Implementasi FindDetailByMongoID (MongoDB)
+func (r *achievementRepository) FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error) {
+	var achievement model.Achievement
+	objID, _ := primitive.ObjectIDFromHex(mongoID)
+	
+	// Cari di collection achievements berdasarkan _id
+	err := r.mongoDB.Collection("achievements").FindOne(ctx, map[string]interface{}{"_id": objID}).Decode(&achievement)
+	if err != nil {
+		return nil, err
+	}
+	return &achievement, nil
 }
