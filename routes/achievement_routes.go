@@ -38,6 +38,7 @@ func (h *AchievementHandler) SetupAchievementRoutes(r *gin.Engine) {
 		// Kita bisa tambah PermissionMiddleware jika ingin lebih spesifik, misal:
 		// achievementGroup.POST("/", middleware.PermissionMiddleware("achievement:create"), h.Create)
 		achievementGroup.POST("/", h.Create)
+		achievementGroup.POST("/:id/submit", h.SubmitForVerification)
 	}
 }
 
@@ -143,4 +144,32 @@ func (h *AchievementHandler) Create(ctx *gin.Context) {
 	// 7. Sukses
 	resp := utils.BuildResponseSuccess("Prestasi berhasil disimpan sebagai draft", nil)
 	ctx.JSON(http.StatusCreated, resp)
+}
+
+// [UPDATE BARU] Handler untuk Submit Verifikasi
+func (h *AchievementHandler) SubmitForVerification(ctx *gin.Context) {
+	// 1. Ambil ID Prestasi dari URL (misal: /achievements/123/submit -> id=123)
+	achievementID := ctx.Param("id")
+
+	// 2. Ambil UserID dari Token (untuk validasi kepemilikan)
+	userIDInterface, exists := ctx.Get("userID")
+	if !exists {
+		resp := utils.BuildResponseFailed("Unauthorized", "User ID tidak ditemukan", nil)
+		ctx.JSON(http.StatusUnauthorized, resp)
+		return
+	}
+	userID := userIDInterface.(uuid.UUID)
+
+	// 3. Panggil Service
+	err := h.achievementService.SubmitForVerification(ctx, achievementID, userID.String())
+	if err != nil {
+		// Jika error karena validasi (misal status bukan draft, atau bukan pemilik)
+		resp := utils.BuildResponseFailed("Gagal submit prestasi", err.Error(), nil)
+		ctx.JSON(http.StatusBadRequest, resp)
+		return
+	}
+
+	// 4. Sukses
+	resp := utils.BuildResponseSuccess("Prestasi berhasil disubmit untuk verifikasi", nil)
+	ctx.JSON(http.StatusOK, resp)
 }

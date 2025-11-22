@@ -12,6 +12,8 @@ import (
 // AchievementRepository adalah kontrak interface
 type AchievementRepository interface {
 	Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error
+	FindByID(id string) (*model.AchievementReference, error)
+	UpdateStatus(id string, status string) error
 }
 
 // achievementRepository struct implementasi
@@ -64,4 +66,23 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 
 	// 4. Commit (Simpan Permanen)
 	return tx.Commit().Error
+}
+
+// [UPDATE BARU] Implementasi FindByID
+func (r *achievementRepository) FindByID(id string) (*model.AchievementReference, error) {
+	var achievement model.AchievementReference
+	// Cari data di tabel PostgreSQL berdasarkan Primary Key (ID)
+	err := r.pgDB.Where("id = ?", id).First(&achievement).Error
+	if err != nil {
+		return nil, err
+	}
+	return &achievement, nil
+}
+
+// [UPDATE BARU] Implementasi UpdateStatus
+func (r *achievementRepository) UpdateStatus(id string, status string) error {
+	// Update kolom 'status' pada tabel achievement_references dimana id cocok
+	return r.pgDB.Model(&model.AchievementReference{}).
+		Where("id = ?", id).
+		Update("status", status).Error
 }

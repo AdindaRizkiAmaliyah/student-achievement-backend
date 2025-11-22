@@ -5,6 +5,7 @@ import (
 	"student-achievement-backend/app/model"
 	"student-achievement-backend/app/repository"
 	"time"
+	"errors"
 
 	"github.com/google/uuid" // Jangan lupa import ini untuk parsing UUID
 )
@@ -12,6 +13,7 @@ import (
 // AchievementService interface
 type AchievementService interface {
 	SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error
+	SubmitForVerification(ctx context.Context, achievementID string, userID string) error
 }
 
 // achievementService struct
@@ -52,4 +54,39 @@ func (s *achievementService) SubmitAchievement(ctx context.Context, studentID st
 	// 2. Panggil Repository
 	// Data pgData sekarang sudah berisi StudentID yang benar dan MongoAchievementID akan diisi di repo
 	return s.achievementRepo.Create(ctx, pgData, mongoData)
+}
+
+// [UPDATE BARU] Implementasi Logika Submit Verification (FR-004)
+func (s *achievementService) SubmitForVerification(ctx context.Context, achievementID string, userID string) error {
+	// 1. Cari data prestasi berdasarkan ID
+	achievement, err := s.achievementRepo.FindByID(achievementID)
+	if err != nil {
+		return errors.New("prestasi tidak ditemukan")
+	}
+
+	// 2. Cek Kepemilikan (Authorization Check)
+	// Pastikan yang mensubmit adalah mahasiswa pemilik prestasi itu sendiri
+	// Kita bandingkan UserID yang login dengan StudentID di data prestasi
+	// Note: Di database kita simpan studentID sebagai UUID, jadi harus konversi dulu untuk membandingkan
+	if achievement.StudentID.String() != userID {
+		// Pengecekan kasar: karena di create kita simpan user.ID ke studentID.
+		// Idealnya user.ID -> cari student -> match student.ID.
+		// Tapi di tahap create sebelumnya kita direct mapping UserID -> StudentID.
+		// Jadi perbandingan ini valid untuk struktur saat ini.
+		return errors.New("anda tidak berhak mengubah prestasi ini")
+	}
+
+	// 3. Cek Status Awal (Precondition)
+	// Prestasi hanya boleh disubmit jika statusnya masih 'draft'
+	if achievement.Status != "draft" {
+		return errors.New("prestasi hanya bisa disubmit jika statusnya draft")
+	}
+
+	// 4. Update status menjadi 'submitted' [cite: 195]
+	err = s.achievementRepo.UpdateStatus(achievementID, "submitted")
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
