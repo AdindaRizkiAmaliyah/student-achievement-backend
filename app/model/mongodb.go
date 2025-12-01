@@ -3,23 +3,24 @@ package model
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // Achievement merepresentasikan 1 dokumen prestasi di MongoDB (collection: achievements)
 // Struktur mengikuti definisi di SRS bagian 3.2.1 Collection achievements.
 type Achievement struct {
-	ID              primitive.ObjectID  `bson:"_id,omitempty"`          // _id: ObjectId
-	StudentID       string              `bson:"studentId"`              // studentId: UUID (disimpan sebagai string, refer ke PostgreSQL students.id)
-	AchievementType string              `bson:"achievementType"`        // achievementType: 'academic', 'competition', dll.
-	Title           string              `bson:"title"`                  // title: judul prestasi
-	Description     string              `bson:"description"`            // description: deskripsi prestasi
-	Details         AchievementDetails  `bson:"details"`                // details: field dinamis sesuai tipe prestasi
-	Attachments     []AchievementFile   `bson:"attachments,omitempty"`  // attachments: array dokumen pendukung
-	Tags            []string            `bson:"tags,omitempty"`         // tags: label bebas
-	Points          float64             `bson:"points"`                 // points: poin prestasi untuk scoring
-	CreatedAt       time.Time           `bson:"createdAt"`              // createdAt: waktu dibuat
-	UpdatedAt       time.Time           `bson:"updatedAt"`              // updatedAt: waktu diupdate
+	ID              primitive.ObjectID `bson:"_id,omitempty"`     // _id dokumen Mongo
+	StudentID       uuid.UUID         `bson:"studentId"`         // ID mahasiswa (sama dengan students.id di Postgres)
+	AchievementType string            `bson:"achievementType"`   // tipe prestasi: competition/publication/organization/certification
+	Title           string            `bson:"title"`             // judul prestasi
+	Description     string            `bson:"description"`       // deskripsi singkat
+	Details         AchievementDetails `bson:"details"`          // detail spesifik tergantung tipe
+	Attachments     []Attachment       `bson:"attachments"`      // daftar lampiran bukti
+	Tags            []string           `bson:"tags"`             // tag/tagline pendukung
+	Points          int                `bson:"points"`           // bobot poin prestasi
+	CreatedAt       time.Time          `bson:"createdAt"`        // tanggal dibuat
+	UpdatedAt       time.Time          `bson:"updatedAt"`        // tanggal terakhir diupdate
 }
 
 // AchievementDetails menyimpan field dinamis (competition/publication/organization/certification)
@@ -44,10 +45,10 @@ type AchievementDetails struct {
 	Period           *Period   `bson:"period,omitempty"`           // period: { start, end }
 
 	// Certification fields
-	CertificationName   *string   `bson:"certificationName,omitempty"`   // certificationName
-	IssuedBy            *string   `bson:"issuedBy,omitempty"`            // issuedBy
-	CertificationNumber *string   `bson:"certificationNumber,omitempty"` // certificationNumber
-	ValidUntil          *time.Time `bson:"validUntil,omitempty"`         // validUntil
+	CertificationName   *string    `bson:"certificationName,omitempty"`   // certificationName
+	IssuedBy            *string    `bson:"issuedBy,omitempty"`            // issuedBy
+	CertificationNumber *string    `bson:"certificationNumber,omitempty"` // certificationNumber
+	ValidUntil          *time.Time `bson:"validUntil,omitempty"`          // validUntil
 
 	// Common fields
 	EventDate *time.Time `bson:"eventDate,omitempty"` // eventDate
@@ -56,7 +57,7 @@ type AchievementDetails struct {
 	Score     *float64   `bson:"score,omitempty"`     // score
 
 	// CustomFields dipakai untuk field tambahan yang tidak terdefinisi di SRS.
-	// Soft delete bisa diletakkan di sini, contoh: customFields["isDeleted"] = true
+	// Misal: customFields["isDeleted"] = true, dsb.
 	CustomFields map[string]any `bson:"customFields,omitempty"` // customFields
 }
 
@@ -66,8 +67,9 @@ type Period struct {
 	End   *time.Time `bson:"end,omitempty"`   // end
 }
 
-// AchievementFile merepresentasikan 1 lampiran (file bukti) prestasi.
-type AchievementFile struct {
+// Attachment merepresentasikan 1 lampiran (file bukti) prestasi.
+// Nama type ini sengaja disamakan dengan yang dipakai di service ([]model.Attachment).
+type Attachment struct {
 	FileName   string    `bson:"fileName"`   // fileName
 	FileURL    string    `bson:"fileUrl"`    // fileUrl
 	FileType   string    `bson:"fileType"`   // fileType (pdf/jpg/dll)

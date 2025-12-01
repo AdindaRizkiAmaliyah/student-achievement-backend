@@ -14,61 +14,36 @@ import (
 )
 
 func main() {
-	// ==============================================================
-	//  LOAD ENV
-	//  - Membaca konfigurasi dari file .env (APP_PORT, DB_HOST, JWT_SECRET, dll.)
-	// ==============================================================
+	// LOAD ENV
 	if err := godotenv.Load(); err != nil {
 		log.Println("⚠️  .env tidak ditemukan, menggunakan environment default")
 	}
 
-	// ==============================================================
-	//  INIT DATABASE (PostgreSQL + MongoDB)
-	//  - Koneksi ke Postgres
-	//  - Migrasi tabel (Role, Permission, User, Student, Lecturer, AchievementReference)
-	//  - Koneksi ke MongoDB (database achievements)
-	// ==============================================================
+	// INIT DATABASE (PostgreSQL + MongoDB)
 	dbConn, err := database.InitDB()
 	if err != nil {
 		log.Fatalf("❌ Gagal koneksi database: %v", err)
 	}
 
-	// ==============================================================
-	//  SEED DATA AWAL (ROLES, PERMISSIONS, USERS, LECTURER, STUDENT)
-	//  - Hanya dijalankan jika tabel masih kosong
-	//  - Berguna karena tidak ada fitur registrasi di SRS (user awal di-seed)
-	// ==============================================================
+	// SEED DATA AWAL (roles, users, students, dll.)
 	database.RunSeeders(dbConn.Postgres)
 
-	// ==============================================================
-	//  REPOSITORY LAYER
-	//  - Menghubungkan service dengan database (Postgres & Mongo)
-	// ==============================================================
+	// REPOSITORY LAYER
 	userRepo := repository.NewUserRepository(dbConn.Postgres)
 	achievementRepo := repository.NewAchievementRepository(dbConn.Postgres, dbConn.Mongo)
+	lecturerRepo := repository.NewLecturerRepository(dbConn.Postgres)
 
-	// ==============================================================
-	//  SERVICE LAYER
-	//  - Mewakili bisnis logic sesuai SRS
-	//    * AuthService: FR-001 (Login)
-	//    * AchievementService: FR-003, FR-004, FR-005 (+ FR-006 list)
-	// ==============================================================
+	// SERVICE LAYER
 	authService := service.NewAuthService(userRepo)
-	achievementService := service.NewAchievementService(achievementRepo)
+	achievementService := service.NewAchievementService(achievementRepo, lecturerRepo)
 
-	// ==============================================================
-	//  HTTP ROUTER (GIN)
-	//  - Mendefinisikan endpoint REST API sesuai SRS
-	// ==============================================================
+	// ROUTES
 	r := gin.Default()
 
-	// Auth (FR-001: Login)
 	routes.AuthRoutes(r, authService)
-
-	// Achievements (FR-003: create, FR-004: submit, FR-005: delete, FR-006: list)
 	routes.AchievementRoutes(r, achievementService)
 
-	// Root endpoint (opsional, untuk health check sederhana)
+	// Root endpoint (opsional)
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"message": "Student Achievement API RUNNING",
@@ -76,10 +51,7 @@ func main() {
 		})
 	})
 
-	// ==============================================================
-	//  START SERVER
-	//  - Menggunakan APP_PORT dari .env (default: 8080)
-	// ==============================================================
+	// START SERVER
 	port := os.Getenv("APP_PORT")
 	if port == "" {
 		port = "8080"

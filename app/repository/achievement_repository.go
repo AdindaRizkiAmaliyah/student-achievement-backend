@@ -33,6 +33,10 @@ type AchievementRepository interface {
 	// FindByStudentID mengambil seluruh AchievementReference milik mahasiswa tertentu (kecuali yang status deleted).
 	FindByStudentID(studentID string) ([]model.AchievementReference, error)
 
+	// FindByAdvisorID mengambil seluruh AchievementReference milik mahasiswa
+	// yang dibimbing oleh dosen wali tertentu (advisor_id = lecturerID).
+	FindByAdvisorID(advisorID uuid.UUID) ([]model.AchievementReference, error)
+
 	// FindDetailByMongoID mengambil dokumen prestasi dari MongoDB berdasarkan MongoAchievementID.
 	FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error)
 }
@@ -109,8 +113,6 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 }
 
 // FindByID mengambil AchievementReference dari PostgreSQL berdasarkan ID.
-// Catatan: tidak lagi memanggil Preload("Student") karena field Student di model di-ignore (gorm:"-")
-// sehingga Preload akan menimbulkan error "unsupported relations".
 func (r *achievementRepository) FindByID(id string) (*model.AchievementReference, error) {
 	var ref model.AchievementReference
 	err := r.pgDB.
@@ -226,6 +228,18 @@ func (r *achievementRepository) FindByStudentID(studentID string) ([]model.Achie
 	err := r.pgDB.
 		Where("student_id = ? AND status != 'deleted'", studentID).
 		Order("created_at DESC").
+		Find(&refs).Error
+	return refs, err
+}
+
+// FindByAdvisorID mengambil semua prestasi dari mahasiswa yang dibimbing oleh satu dosen wali (advisor).
+// Implementasi: JOIN achievement_references dengan students berdasarkan student_id.
+func (r *achievementRepository) FindByAdvisorID(advisorID uuid.UUID) ([]model.AchievementReference, error) {
+	var refs []model.AchievementReference
+	err := r.pgDB.
+		Joins("JOIN students ON students.id = achievement_references.student_id").
+		Where("students.advisor_id = ? AND achievement_references.status != 'deleted'", advisorID).
+		Order("achievement_references.created_at DESC").
 		Find(&refs).Error
 	return refs, err
 }
