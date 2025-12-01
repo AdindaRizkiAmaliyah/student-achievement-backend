@@ -3,70 +3,73 @@ package model
 import (
 	"time"
 
-	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// 3.2.1 Collection achievements
+// Achievement merepresentasikan 1 dokumen prestasi di MongoDB (collection: achievements)
+// Struktur mengikuti definisi di SRS bagian 3.2.1 Collection achievements.
 type Achievement struct {
-	ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	StudentID       uuid.UUID          `bson:"studentId" json:"studentId"` // Reference to Postgres
-	AchievementType string             `bson:"achievementType" json:"achievementType"`
-	Title           string             `bson:"title" json:"title"`
-	Description     string             `bson:"description" json:"description"`
-	Details         AchievementDetails `bson:"details" json:"details"`
-	CustomFields    map[string]interface{} `bson:"customFields,omitempty" json:"customFields,omitempty"`
-	Attachments     []Attachment       `bson:"attachments" json:"attachments"`
-	Tags            []string           `bson:"tags" json:"tags"`
-	Points          int                `bson:"points" json:"points"`
-	CreatedAt       time.Time          `bson:"createdAt" json:"createdAt"`
-	UpdatedAt       time.Time          `bson:"updatedAt" json:"updatedAt"`
+	ID              primitive.ObjectID  `bson:"_id,omitempty"`          // _id: ObjectId
+	StudentID       string              `bson:"studentId"`              // studentId: UUID (disimpan sebagai string, refer ke PostgreSQL students.id)
+	AchievementType string              `bson:"achievementType"`        // achievementType: 'academic', 'competition', dll.
+	Title           string              `bson:"title"`                  // title: judul prestasi
+	Description     string              `bson:"description"`            // description: deskripsi prestasi
+	Details         AchievementDetails  `bson:"details"`                // details: field dinamis sesuai tipe prestasi
+	Attachments     []AchievementFile   `bson:"attachments,omitempty"`  // attachments: array dokumen pendukung
+	Tags            []string            `bson:"tags,omitempty"`         // tags: label bebas
+	Points          float64             `bson:"points"`                 // points: poin prestasi untuk scoring
+	CreatedAt       time.Time           `bson:"createdAt"`              // createdAt: waktu dibuat
+	UpdatedAt       time.Time           `bson:"updatedAt"`              // updatedAt: waktu diupdate
 }
 
-// Struktur detail dinamis
-// Menggunakan pointer (*) dan omitempty agar field yang tidak diisi tidak disimpan ke Mongo
+// AchievementDetails menyimpan field dinamis (competition/publication/organization/certification)
+// Field-field ini langsung mengikuti nama di SRS, tanpa penambahan.
 type AchievementDetails struct {
-	// Competition
-	CompetitionName  string `bson:"competitionName,omitempty" json:"competitionName,omitempty"`
-	CompetitionLevel string `bson:"competitionLevel,omitempty" json:"competitionLevel,omitempty"`
-	Rank             int    `bson:"rank,omitempty" json:"rank,omitempty"`
-	MedalType        string `bson:"medalType,omitempty" json:"medalType,omitempty"`
+	// Competition fields
+	CompetitionName  *string    `bson:"competitionName,omitempty"`  // competitionName
+	CompetitionLevel *string    `bson:"competitionLevel,omitempty"` // competitionLevel: international/national/regional/local
+	Rank             *int       `bson:"rank,omitempty"`             // rank
+	MedalType        *string    `bson:"medalType,omitempty"`        // medalType
 
-	// Publication
-	PublicationType  string   `bson:"publicationType,omitempty" json:"publicationType,omitempty"`
-	PublicationTitle string   `bson:"publicationTitle,omitempty" json:"publicationTitle,omitempty"`
-	Authors          []string `bson:"authors,omitempty" json:"authors,omitempty"`
-	Publisher        string   `bson:"publisher,omitempty" json:"publisher,omitempty"`
-	ISSN             string   `bson:"issn,omitempty" json:"issn,omitempty"`
+	// Publication fields
+	PublicationType  *string   `bson:"publicationType,omitempty"`  // publicationType: journal/conference/book
+	PublicationTitle *string   `bson:"publicationTitle,omitempty"` // publicationTitle
+	Authors          []string  `bson:"authors,omitempty"`          // authors: array string
+	Publisher        *string   `bson:"publisher,omitempty"`        // publisher
+	ISSN             *string   `bson:"issn,omitempty"`             // issn
 
-	// Organization
-	OrganizationName string             `bson:"organizationName,omitempty" json:"organizationName,omitempty"`
-	Position         string             `bson:"position,omitempty" json:"position,omitempty"`
-	Period           *OrganizationPeriod `bson:"period,omitempty" json:"period,omitempty"`
+	// Organization fields
+	OrganizationName *string   `bson:"organizationName,omitempty"` // organizationName
+	Position         *string   `bson:"position,omitempty"`         // position
+	Period           *Period   `bson:"period,omitempty"`           // period: { start, end }
 
-	// Certification
-	CertificationName   string     `bson:"certificationName,omitempty" json:"certificationName,omitempty"`
-	IssuedBy            string     `bson:"issuedBy,omitempty" json:"issuedBy,omitempty"`
-	CertificationNumber string     `bson:"certificationNumber,omitempty" json:"certificationNumber,omitempty"`
-	ValidUntil          *time.Time `bson:"validUntil,omitempty" json:"validUntil,omitempty"`
+	// Certification fields
+	CertificationName   *string   `bson:"certificationName,omitempty"`   // certificationName
+	IssuedBy            *string   `bson:"issuedBy,omitempty"`            // issuedBy
+	CertificationNumber *string   `bson:"certificationNumber,omitempty"` // certificationNumber
+	ValidUntil          *time.Time `bson:"validUntil,omitempty"`         // validUntil
 
-	// Common Fields
-	EventDate *time.Time `bson:"eventDate,omitempty" json:"eventDate,omitempty"`
-	Location  string     `bson:"location,omitempty" json:"location,omitempty"`
-	Organizer string     `bson:"organizer,omitempty" json:"organizer,omitempty"`
-	Score     float64    `bson:"score,omitempty" json:"score,omitempty"`
+	// Common fields
+	EventDate *time.Time `bson:"eventDate,omitempty"` // eventDate
+	Location  *string    `bson:"location,omitempty"`  // location
+	Organizer *string    `bson:"organizer,omitempty"` // organizer
+	Score     *float64   `bson:"score,omitempty"`     // score
+
+	// CustomFields dipakai untuk field tambahan yang tidak terdefinisi di SRS.
+	// Soft delete bisa diletakkan di sini, contoh: customFields["isDeleted"] = true
+	CustomFields map[string]any `bson:"customFields,omitempty"` // customFields
 }
 
-// Helper untuk Period di Organization
-type OrganizationPeriod struct {
-	Start time.Time `bson:"start" json:"start"`
-	End   time.Time `bson:"end" json:"end"`
+// Period merepresentasikan periode (untuk organization) dengan start dan end date.
+type Period struct {
+	Start *time.Time `bson:"start,omitempty"` // start
+	End   *time.Time `bson:"end,omitempty"`   // end
 }
 
-// Struktur Attachment
-type Attachment struct {
-	FileName   string    `bson:"fileName" json:"fileName"`
-	FileURL    string    `bson:"fileUrl" json:"fileUrl"`
-	FileType   string    `bson:"fileType" json:"fileType"`
-	UploadedAt time.Time `bson:"uploadedAt" json:"uploadedAt"`
+// AchievementFile merepresentasikan 1 lampiran (file bukti) prestasi.
+type AchievementFile struct {
+	FileName   string    `bson:"fileName"`   // fileName
+	FileURL    string    `bson:"fileUrl"`    // fileUrl
+	FileType   string    `bson:"fileType"`   // fileType (pdf/jpg/dll)
+	UploadedAt time.Time `bson:"uploadedAt"` // uploadedAt
 }

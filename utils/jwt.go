@@ -9,76 +9,87 @@ import (
 	"github.com/google/uuid"
 )
 
-// JWTSecret adalah "kunci rahasia" dapur.
-// Hanya server yang tahu kunci ini untuk tanda tangan token.
-// Kita ambil nilainya dari file .env agar aman.
-var JWTSecret = []byte(os.Getenv("JWT_SECRET"))
+/*
+ JWTCustomClaims
 
-// JWTCustomClaims mendefinisikan isi "daging" data di dalam token.
-// Sesuai SRS, kita butuh Role dan Permission untuk pengecekan hak akses nanti.
+ Sesuai kebutuhan sistem (dan SRS), token harus menyimpan:
+ - UserID     (uuid)  : identitas user
+ - StudentID  (uuid)  : identitas mahasiswa untuk fitur prestasi
+                       (bisa uuid.Nil apabila user bukan mahasiswa)
+ - Role       (string): nama role (admin / dosen_wali / mahasiswa)
+ - Permissions([]string): daftar permission yang dimiliki user
+*/
 type JWTCustomClaims struct {
-	UserID      uuid.UUID `json:"user_id"`      // ID User pelapor
-	Role        string    `json:"role"`         // Admin / Mahasiswa / Dosen Wali
-	Permissions []string  `json:"permissions"`  // Daftar izin (misal: achievement:create)
-	jwt.RegisteredClaims                        // Standar bawaan JWT (expired, issuer, dll)
+	UserID      uuid.UUID `json:"userId"`
+	StudentID   uuid.UUID `json:"studentId"`
+	Role        string    `json:"role"`
+	Permissions []string  `json:"permissions"`
+	jwt.RegisteredClaims
 }
 
-// GenerateToken berfungsi membuat token baru saat user berhasil login.
-// Token ini berlaku selama 24 jam.
-func GenerateToken(userID uuid.UUID, role string, permissions []string) (string, error) {
-	// 1. Siapkan isi "karcis" (Claims)
+// getJWTSecret membaca JWT_SECRET dari environment setiap kali dipanggil.
+// Ini menghindari masalah ketika .env baru di-load setelah package di-import.
+func getJWTSecret() ([]byte, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, errors.New("JWT_SECRET is not configured")
+	}
+	return []byte(secret), nil
+}
+
+// GenerateToken membuat JWT access token yang menyimpan userID, studentID, role, dan permissions.
+// Expired time saat ini diset 24 jam (access token).
+func GenerateToken(userID uuid.UUID, studentID uuid.UUID, role string, permissions []string) (string, error) {
+	secret, err := getJWTSecret()
+	if err != nil {
+		return "", err
+	}
+
 	claims := JWTCustomClaims{
 		UserID:      userID,
+		StudentID:   studentID, // bisa uuid.Nil kalau bukan mahasiswa
 		Role:        role,
 		Permissions: permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
-			// Token akan kadaluarsa dalam 24 jam dari sekarang
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			// Waktu token dibuat
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // masa berlaku token
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			// Identitas penerbit token (nama aplikasi kita)
-			Issuer:    "student-achievement-backend",
+			Subject:   userID.String(),
 		},
 	}
 
-	// 2. Pilih metode enkripsi (Signing Method)
-	// HS256 adalah standar industri yang umum, cepat, dan aman.
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// 3. Tanda tangani token dengan kunci rahasia (JWT_SECRET)
-	// Hasilnya adalah string panjang (eyJhbGciOiJIUzI1NiIs...)
-	t, err := token.SignedString(JWTSecret)
-	if err != nil {
-		return "", err // Gagal bikin token
-	}
-
-	return t, nil // Berhasil, kembalikan string token
+	return token.SignedString(secret)
 }
 
-// ValidateToken akan dipakai oleh Middleware nanti untuk mengecek:
-// "Apakah token ini asli buatan server kita atau palsu?"
+// ValidateToken mem-validasi JWT dan mengembalikan *JWTCustomClaims jika valid.
+// - Mengecek signing method (HMAC).
+// - Menggunakan JWT_SECRET dari environment.
+// - Mengecek expiration dan validitas klaim.
 func ValidateToken(tokenString string) (*JWTCustomClaims, error) {
-	// 1. Parse (bongkar) token string kembali menjadi objek token
-	token, err := jwt.ParseWithClaims(tokenString, &JWTCustomClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Validasi keamanan: Pastikan metode enkripsinya adalah HMAC (HS256).
-		// Kalau metodenya beda (misal 'none'), tolak karena itu trik hacker.
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		// Jika aman, kembalikan kunci rahasia untuk verifikasi tanda tangan
-		return JWTSecret, nil
-	})
-
-	// 2. Cek apakah ada error saat parsing (misal token sudah kadaluarsa/expired)
+	secret, err := getJWTSecret()
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Jika token valid dan isinya bisa dibaca sebagai JWTCustomClaims...
-	if claims, ok := token.Claims.(*JWTCustomClaims); ok && token.Valid {
-		return claims, nil // Kembalikan data user (ID, Role, dll)
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		&JWTCustomClaims{},
+		func(t *jwt.Token) (interface{}, error) {
+			// verifikasi signing method HMAC
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return secret, nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	// 4. Jika token strukturnya aneh atau tidak valid
-	return nil, errors.New("token invalid atau tidak dikenali")
+	claims, ok := token.Claims.(*JWTCustomClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid token")
+	}
+
+	return claims, nil
 }

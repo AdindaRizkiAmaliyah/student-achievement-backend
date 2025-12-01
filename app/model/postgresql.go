@@ -6,81 +6,87 @@ import (
 	"github.com/google/uuid"
 )
 
-// 3.1.1 Tabel users
+// User merepresentasikan data pengguna sistem (admin, mahasiswa, dosen wali)
 type User struct {
-	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Username     string    `gorm:"type:varchar(50);unique;not null" json:"username"`
-	Email        string    `gorm:"type:varchar(100);unique;not null" json:"email"`
-	PasswordHash string    `gorm:"type:varchar(255);not null" json:"-"` // Password tidak di-return di JSON
-	FullName     string    `gorm:"type:varchar(100);not null" json:"fullName"`
-	RoleID       uuid.UUID `gorm:"type:uuid;not null" json:"roleId"`
-	Role         Role      `gorm:"foreignKey:RoleID" json:"role,omitempty"`
-	IsActive     bool      `gorm:"default:true" json:"isActive"`
-	CreatedAt    time.Time `gorm:"autoCreateTime" json:"createdAt"`
-	UpdatedAt    time.Time `gorm:"autoUpdateTime" json:"updatedAt"`
+	ID           uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	Username     string    `gorm:"unique;not null"`
+	Email        string    `gorm:"unique;not null"`
+	PasswordHash string    `gorm:"not null"`
+	FullName     string    `gorm:"not null"`
+	RoleID       uuid.UUID `gorm:"type:uuid;not null"`
+	Role         Role      `gorm:"foreignKey:RoleID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;"`
+	IsActive     bool      `gorm:"default:true"`
+	CreatedAt    time.Time `gorm:"autoCreateTime"`
+	UpdatedAt    time.Time `gorm:"autoUpdateTime"`
 }
 
-// 3.1.2 Tabel roles
+// Role menyimpan peran pengguna (admin, mahasiswa, dosen_wali)
 type Role struct {
-	ID          uuid.UUID        `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Name        string           `gorm:"type:varchar(50);unique;not null" json:"name"`
-	Description string           `gorm:"type:text" json:"description"`
-	CreatedAt   time.Time        `gorm:"autoCreateTime" json:"createdAt"`
-	Permissions []Permission     `gorm:"many2many:role_permissions;" json:"permissions,omitempty"`
+	ID          uuid.UUID    `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	Name        string       `gorm:"unique;not null"`
+	Description string
+	Permissions []Permission `gorm:"many2many:role_permissions;"`
+	Users       []User       `gorm:"foreignKey:RoleID"`
+	CreatedAt   time.Time    `gorm:"autoCreateTime"`
 }
 
-// 3.1.3 Tabel permissions
+// Permission menyimpan hak akses granular untuk setiap resource & action
 type Permission struct {
-	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Name        string    `gorm:"type:varchar(100);unique;not null" json:"name"`
-	Resource    string    `gorm:"type:varchar(50);not null" json:"resource"`
-	Action      string    `gorm:"type:varchar(50);not null" json:"action"`
-	Description string    `gorm:"type:text" json:"description"`
+	ID          uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	Name        string    `gorm:"unique;not null"`
+	Resource    string
+	Action      string
+	Description string
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
 }
 
-// 3.1.4 Tabel role_permissions (Junction Table)
-// Note: GORM menangani ini via many2many, tapi jika butuh explicit struct:
-type RolePermission struct {
-	RoleID       uuid.UUID `gorm:"primaryKey" json:"roleId"`
-	PermissionID uuid.UUID `gorm:"primaryKey" json:"permissionId"`
-}
-
-// 3.1.5 Tabel students 
+// Student merepresentasikan data mahasiswa
+// Kolom mengikuti SRS: id, user_id, student_id, program_study, academic_year, advisor_id, created_at, updated_at
 type Student struct {
-	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID       uuid.UUID `gorm:"type:uuid;not null" json:"userId"`
-	User         User      `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	// Kita tambahkan 'column:student_id' secara eksplisit agar GORM tidak bingung
-	StudentID    string    `gorm:"column:student_id;type:varchar(20);unique;not null" json:"studentId"`
-	ProgramStudy string    `gorm:"type:varchar(100)" json:"programStudy"`
-	AcademicYear string    `gorm:"type:varchar(10)" json:"academicYear"`
-	AdvisorID    uuid.UUID `gorm:"type:uuid" json:"advisorId"`
-	Advisor      Lecturer  `gorm:"foreignKey:AdvisorID" json:"advisor,omitempty"`
-	CreatedAt    time.Time `gorm:"autoCreateTime" json:"createdAt"`
+	ID           uuid.UUID  `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	UserID       uuid.UUID  `gorm:"type:uuid;not null"`
+	User         User       `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	StudentID    string     `gorm:"type:varchar(20);not null;column:student_id"` // NIM
+	ProgramStudy string     `gorm:"type:varchar(100)"`
+	AcademicYear string     `gorm:"type:varchar(10)"`
+	AdvisorID    *uuid.UUID `gorm:"type:uuid"` // FK ke lecturers.id
+	Advisor      *Lecturer  `gorm:"foreignKey:AdvisorID"`                        // dosen wali
+	CreatedAt    time.Time  `gorm:"autoCreateTime"`
+	UpdatedAt    time.Time  `gorm:"autoUpdateTime"`
 }
 
-// 3.1.6 Tabel lecturers
+
+// Lecturer merepresentasikan data dosen (termasuk dosen wali)
 type Lecturer struct {
-	ID         uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID     uuid.UUID `gorm:"type:uuid;not null" json:"userId"`
-	User       User      `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	LecturerID string    `gorm:"type:varchar(20);unique;not null" json:"lecturerId"` // NIP/NIDN
-	Department string    `gorm:"type:varchar(100)" json:"department"`
-	CreatedAt  time.Time `gorm:"autoCreateTime" json:"createdAt"`
+	ID         uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	UserID     uuid.UUID `gorm:"type:uuid;not null"`
+	User       User      `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	LecturerID string    `gorm:"unique;not null"` // kode/nip dosen
+	Department string
+	Advisees   []Student `gorm:"foreignKey:AdvisorID"` // daftar mahasiswa bimbingan
+	CreatedAt  time.Time `gorm:"autoCreateTime"`
 }
 
-// 3.1.7 Tabel achievement_references
+// AchievementReference menyimpan referensi prestasi di Postgres yang terhubung ke dokumen di Mongo
 type AchievementReference struct {
-	ID                 uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	StudentID          uuid.UUID  `gorm:"type:uuid;not null" json:"studentId"`
-	Student            Student    `gorm:"foreignKey:StudentID" json:"student,omitempty"`
-	MongoAchievementID string     `gorm:"type:varchar(24);not null" json:"mongoAchievementId"`
-	Status             string     `gorm:"type:varchar(20);default:'draft'" json:"status"` // Enum: draft, submitted, verified, rejected
-	SubmittedAt        *time.Time `json:"submittedAt"`
-	VerifiedAt         *time.Time `json:"verifiedAt"`
-	VerifiedBy         *uuid.UUID `gorm:"type:uuid" json:"verifiedBy"`
-	Verifier           *User      `gorm:"foreignKey:VerifiedBy" json:"verifier,omitempty"`
-	RejectionNote      string     `gorm:"type:text" json:"rejectionNote"`
-	CreatedAt          time.Time  `gorm:"autoCreateTime" json:"createdAt"`
-	UpdatedAt          time.Time  `gorm:"autoUpdateTime" json:"updatedAt"`
+	ID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+
+	// Simpan FK ke mahasiswa (students.id), TANPA bikin relasi otomatis dua arah
+	StudentID uuid.UUID `gorm:"type:uuid;not null"`
+
+	// Kalau kamu pengin tetap punya field Student di struct utk dipakai di kode,
+	// tapi TANPA ikut migrasi/foreign key, pakai gorm:"-"
+	Student Student `gorm:"-"` // diabaikan saat migrasi, tapi masih bisa dipakai manual di kode
+
+	MongoAchievementID string `gorm:"not null"` // _id dokumen di MongoDB (hex string)
+
+	// Status mengikuti SRS + revisi: draft, submitted, verified, rejected, deleted
+	Status        string     `gorm:"type:varchar(20);not null;check:status IN ('draft','submitted','verified','rejected','deleted')"`
+	SubmittedAt   *time.Time // waktu mahasiswa submit prestasi
+	VerifiedAt    *time.Time // waktu dosen wali/verifier memverifikasi
+	VerifiedBy    *uuid.UUID `gorm:"type:uuid"` // FK ke users.id (yang memverifikasi)
+	Verifier      *User      `gorm:"foreignKey:VerifiedBy"`
+	RejectionNote *string    // alasan penolakan jika status rejected
+	CreatedAt     time.Time  `gorm:"autoCreateTime"`
+	UpdatedAt     time.Time  `gorm:"autoUpdateTime"`
 }

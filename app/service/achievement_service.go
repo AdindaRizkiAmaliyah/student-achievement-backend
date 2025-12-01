@@ -1,162 +1,262 @@
 package service
 
 import (
-	"context"
+	"net/http"
+	"time"
+
 	"student-achievement-backend/app/model"
 	"student-achievement-backend/app/repository"
-	"time"
-	"errors"
+	"student-achievement-backend/utils"
 
-	"github.com/google/uuid" // Jangan lupa import ini untuk parsing UUID
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-// AchievementService interface
+// AchievementService mendefinisikan behavior fitur prestasi (FR-03 s.d. FR-05).
 type AchievementService interface {
-	SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error
-	SubmitForVerification(ctx context.Context, achievementID string, userID string) error
-	DeleteAchievement(ctx context.Context, achievementID string, userID string) error
-	// [UPDATE BARU] Fungsi Get List
-	// Returnnya interface{} agar kita bisa bikin struktur custom (gabungan)
-	GetAchievementsByStudent(ctx context.Context, userID string) ([]map[string]interface{}, error)
+	CreateAchievement(ctx *gin.Context)       // FR-03
+	SubmitForVerification(ctx *gin.Context)   // FR-04
+	DeleteAchievement(ctx *gin.Context)       // FR-05
+	GetAchievementsByStudent(ctx *gin.Context) // FR-06 (list, pendukung)
 }
 
-// achievementService struct
+// achievementService adalah implementasi konkret AchievementService.
 type achievementService struct {
-	achievementRepo repository.AchievementRepository
+	repo repository.AchievementRepository
 }
 
-// NewAchievementService constructor
-func NewAchievementService(achievementRepo repository.AchievementRepository) AchievementService {
-	return &achievementService{
-		achievementRepo: achievementRepo,
-	}
+// NewAchievementService membuat instance achievementService.
+func NewAchievementService(repo repository.AchievementRepository) AchievementService {
+	return &achievementService{repo: repo}
 }
 
-// SubmitAchievement logika bisnis pelaporan prestasi
-func (s *achievementService) SubmitAchievement(ctx context.Context, studentID string, pgData *model.AchievementReference, mongoData *model.Achievement) error {
-	
-	// --- [PERBAIKAN UTAMA] ---
-	// Konversi studentID (string dari token) menjadi UUID (format database)
-	uid, err := uuid.Parse(studentID)
-	if err == nil {
-		// Masukkan UUID yang valid ke struct data
-		pgData.StudentID = uid
-		mongoData.StudentID = uid
-	}
-	// -------------------------
+// customError tipe sederhana untuk error internal service.
+type customError struct{ msg string }
 
-	// 1. Set Default Values sesuai Aturan Bisnis SRS
-	pgData.Status = "draft" // Status awal wajib draft
-	
-	// Isi timestamp otomatis
+func (e *customError) Error() string { return e.msg }
+
+var ErrNoStudentIDInContext = &customError{msg: "studentID not found in context (ensure middleware sets studentID)"}
+
+// getStudentIDFromContext mengambil studentID dari context (diset oleh AuthMiddleware khusus mahasiswa).
+// Tidak ada fallback ke userID supaya endpoint ini hanya bisa diakses role mahasiswa.
+func getStudentIDFromContext(ctx *gin.Context) (uuid.UUID, error) {
+	if v, ok := ctx.Get("studentID"); ok {
+		if sid, ok2 := v.(uuid.UUID); ok2 {
+			return sid, nil
+		}
+	}
+	return uuid.Nil, ErrNoStudentIDInContext
+}
+
+// CreateAchievement – FR-03
+// Endpoint: POST /api/v1/achievements
+// Fungsinya: Mahasiswa membuat prestasi baru dengan status awal 'draft'.
+func (s *achievementService) CreateAchievement(ctx *gin.Context) {
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
+	}
+
+	// Payload mengikuti SRS: achievementType, title, description, details, tags, points, attachments.
+	var input struct {
+		AchievementType string                   `json:"achievementType" binding:"required"`
+		Title           string                   `json:"title" binding:"required"`
+		Description     string                   `json:"description"`
+		Details         model.AchievementDetails `json:"details"`
+		Tags            []string                 `json:"tags"`
+		Points          float64                  `json:"points"`
+		Attachments     []model.AchievementFile  `json:"attachments"`
+	}
+
+	if err := ctx.ShouldBindJSON(&input); err != nil {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Input tidak valid", err.Error(), nil))
+		return
+	}
+
 	now := time.Now()
-	pgData.CreatedAt = now
-	pgData.UpdatedAt = now
-	mongoData.CreatedAt = now
-	mongoData.UpdatedAt = now
 
-	// 2. Panggil Repository
-	// Data pgData sekarang sudah berisi StudentID yang benar dan MongoAchievementID akan diisi di repo
-	return s.achievementRepo.Create(ctx, pgData, mongoData)
+	// Data referensi di PostgreSQL (achievement_references)
+	pg := model.AchievementReference{
+		StudentID:          studentID,
+		MongoAchievementID: "",
+		Status:             "draft",
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	// Data lengkap prestasi di MongoDB (achievements)
+	mongo := model.Achievement{
+		StudentID:       studentID.String(),   // simpan sebagai string UUID
+		AchievementType: input.AchievementType,
+		Title:           input.Title,
+		Description:     input.Description,
+		Details:         input.Details,
+		Attachments:     input.Attachments,
+		Tags:            input.Tags,
+		Points:          input.Points,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	if err := s.repo.Create(ctx.Request.Context(), &pg, &mongo); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menyimpan prestasi", err.Error(), nil))
+		return
+	}
+
+	ctx.JSON(http.StatusCreated,
+		utils.BuildResponseSuccess("Prestasi berhasil disimpan sebagai draft", map[string]interface{}{
+			"id":                 pg.ID,
+			"mongoAchievementId": pg.MongoAchievementID,
+			"status":             pg.Status,
+		}))
 }
 
-// Implementasi Logika Submit Verification (FR-004)
-func (s *achievementService) SubmitForVerification(ctx context.Context, achievementID string, userID string) error {
-	// 1. Cari data prestasi berdasarkan ID
-	achievement, err := s.achievementRepo.FindByID(achievementID)
+// SubmitForVerification – FR-04
+// Endpoint: POST /api/v1/achievements/:id/submit
+// Fungsinya: Mahasiswa mengajukan prestasi draft ke dosen wali untuk diverifikasi.
+func (s *achievementService) SubmitForVerification(ctx *gin.Context) {
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
+	}
+
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	// Ambil reference di Postgres
+	ref, err := s.repo.FindByID(id)
 	if err != nil {
-		return errors.New("prestasi tidak ditemukan")
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
 	}
 
-	// 2. Cek Kepemilikan (Authorization Check)
-	// Pastikan yang mensubmit adalah mahasiswa pemilik prestasi itu sendiri
-	// Kita bandingkan UserID yang login dengan StudentID di data prestasi
-	// Note: Di database kita simpan studentID sebagai UUID, jadi harus konversi dulu untuk membandingkan
-	if achievement.StudentID.String() != userID {
-		// Pengecekan kasar: karena di create kita simpan user.ID ke studentID.
-		// Idealnya user.ID -> cari student -> match student.ID.
-		// Tapi di tahap create sebelumnya kita direct mapping UserID -> StudentID.
-		// Jadi perbandingan ini valid untuk struktur saat ini.
-		return errors.New("anda tidak berhak mengubah prestasi ini")
+	// Pastikan pemilik prestasi adalah mahasiswa yang login
+	if ref.StudentID != studentID {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Anda tidak berhak submit prestasi ini", "forbidden", nil))
+		return
 	}
 
-	// 3. Cek Status Awal (Precondition)
-	// Prestasi hanya boleh disubmit jika statusnya masih 'draft'
-	if achievement.Status != "draft" {
-		return errors.New("prestasi hanya bisa disubmit jika statusnya draft")
+	// Hanya boleh submit jika masih draft
+	if ref.Status != "draft" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Prestasi hanya bisa disubmit jika status draft", "invalid_status", nil))
+		return
 	}
 
-	// 4. Update status menjadi 'submitted' [cite: 195]
-	err = s.achievementRepo.UpdateStatus(achievementID, "submitted")
-	if err != nil {
-		return err
+	// Update status menjadi submitted + isi submitted_at
+	if err := s.repo.UpdateStatus(id, "submitted", repository.UpdateStatusOptions{}); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal submit prestasi", err.Error(), nil))
+		return
 	}
 
-	return nil
+	// Pembuatan notifikasi ke dosen wali (jika ada) bisa ditambahkan kemudian.
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Prestasi berhasil disubmit", nil))
 }
 
-// [UPDATE BARU] Implementasi DeleteAchievement (FR-005)
-func (s *achievementService) DeleteAchievement(ctx context.Context, achievementID string, userID string) error {
-    // 1. Cari data prestasi dulu
-    achievement, err := s.achievementRepo.FindByID(achievementID)
-    if err != nil {
-        return errors.New("prestasi tidak ditemukan")
-    }
-
-    // 2. Validasi Kepemilikan (Authorization)
-    // Cek apakah yang mau menghapus adalah pemilik datanya
-    if achievement.StudentID.String() != userID {
-        return errors.New("anda tidak berhak menghapus prestasi ini")
-    }
-
-    // 3. Validasi Status (Precondition)
-    // Sesuai SRS FR-005: Precondition Status 'draft' [cite: 201]
-    if achievement.Status != "draft" {
-        return errors.New("prestasi tidak bisa dihapus karena sudah disubmit atau diverifikasi")
-    }
-
-    // 4. Panggil Repository untuk hapus permanen
-    return s.achievementRepo.Delete(ctx, achievementID)
-}
-
-// [UPDATE BARU] Implementasi Get List
-func (s *achievementService) GetAchievementsByStudent(ctx context.Context, userID string) ([]map[string]interface{}, error) {
-	// 1. Ambil daftar referensi dari PostgreSQL (Status, ID, Tanggal)
-	pgDataList, err := s.achievementRepo.FindByStudentID(userID)
-	if err != nil {
-		return nil, err
+// DeleteAchievement – FR-05
+// Endpoint: DELETE /api/v1/achievements/:id
+// Fungsinya: Mahasiswa menghapus prestasi dengan status draft (soft delete).
+func (s *achievementService) DeleteAchievement(ctx *gin.Context) {
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
 	}
 
-	// 2. Siapkan wadah untuk hasil gabungan
-	var result []map[string]interface{}
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
 
-	// 3. Looping setiap data dari Postgres
-	for _, pgItem := range pgDataList {
-		// Ambil detail (Judul) dari MongoDB berdasarkan ID yang tersimpan di Postgres
-		mongoDetail, err := s.achievementRepo.FindDetailByMongoID(ctx, pgItem.MongoAchievementID)
-		
-		title := "Data Corrupt/Missing"
-		achievementType := "Unknown"
-		
-		// Jika data di Mongo ketemu, ambil Judul aslinya
-		if err == nil {
-			title = mongoDetail.Title
-			achievementType = mongoDetail.AchievementType
+	// Ambil reference di Postgres
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	// Pastikan pemilik prestasi adalah mahasiswa yang login
+	if ref.StudentID != studentID {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Anda tidak berhak menghapus prestasi ini", "forbidden", nil))
+		return
+	}
+
+	// Hanya prestasi draft yang dapat dihapus
+	if ref.Status != "draft" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Hanya prestasi draft yang dapat dihapus", "invalid_status", nil))
+		return
+	}
+
+	// Update status menjadi deleted + soft-delete di Mongo (melalui repository.UpdateStatus)
+	if err := s.repo.UpdateStatus(id, "deleted", repository.UpdateStatusOptions{}); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menghapus prestasi", err.Error(), nil))
+		return
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Prestasi berhasil dihapus", nil))
+}
+
+// GetAchievementsByStudent – FR-06 (list prestasi mahasiswa)
+// Endpoint: GET /api/v1/achievements
+// Fungsinya: Mengambil daftar prestasi milik mahasiswa yang login (tanpa status deleted).
+func (s *achievementService) GetAchievementsByStudent(ctx *gin.Context) {
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
+	}
+
+	// Ambil daftar reference (Postgres)
+	refs, err := s.repo.FindByStudentID(studentID.String())
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal mengambil prestasi", err.Error(), nil))
+		return
+	}
+
+	var list []map[string]interface{}
+	for _, r := range refs {
+		item := map[string]interface{}{
+			"id":          r.ID,
+			"status":      r.Status,
+			"createdAt":   r.CreatedAt,
+			"submittedAt": r.SubmittedAt,
 		}
 
-		// 4. Rakit data gabungan untuk dikirim ke Frontend
-		combinedData := map[string]interface{}{
-			"id":          pgItem.ID,         // ID untuk Edit/Delete
-			"title":       title,             // Dari Mongo
-			"type":        achievementType,   // Dari Mongo
-			"status":      pgItem.Status,     // Dari Postgres
-			"points":      mongoDetail.Points,// Dari Mongo
-			"created_at":  pgItem.CreatedAt,
-			"submitted_at": pgItem.SubmittedAt,
+		// Ambil detail dari Mongo, jika berhasil
+		if md, err := s.repo.FindDetailByMongoID(ctx.Request.Context(), r.MongoAchievementID); err == nil && md != nil {
+			item["title"] = md.Title
+			item["type"] = md.AchievementType
+			item["points"] = md.Points
 		}
 
-		result = append(result, combinedData)
+		list = append(list, item)
 	}
 
-	return result, nil
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Berhasil mengambil daftar prestasi", list))
 }

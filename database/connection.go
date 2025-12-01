@@ -11,18 +11,26 @@ import (
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/bson"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
+// Database menyimpan koneksi Postgres & Mongo dalam satu struct
+// supaya mudah di-pass ke layer lain.
 type Database struct {
 	Postgres *gorm.DB
 	Mongo    *mongo.Database
 }
 
+// InitDB menginisialisasi koneksi ke PostgreSQL & MongoDB,
+// menjalankan migrasi GORM, dan mengembalikan wrapper Database.
 func InitDB() (*Database, error) {
-	// 1. Setup PostgreSQL
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Jakarta",
+
+	// 1. KONFIGURASI POSTGRES
+	dsn := fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Jakarta",
 		os.Getenv("DB_HOST"),
 		os.Getenv("DB_USER"),
 		os.Getenv("DB_PASSWORD"),
@@ -30,51 +38,74 @@ func InitDB() (*Database, error) {
 		os.Getenv("DB_PORT"),
 	)
 
-	// UPDATE PENTING: Tambahkan config DisableForeignKeyConstraintWhenMigrating
 	pgDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true,
+		DisableForeignKeyConstraintWhenMigrating: false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gagal koneksi ke postgres: %v", err)
 	}
 
-	// Auto Migrate
-	log.Println("Menjalankan migrasi database PostgreSQL...")
+	// 2. ENABLE EXTENSION PGCRYPTO — diperlukan untuk gen_random_uuid()
+	if err := pgDB.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`).Error; err != nil {
+		return nil, fmt.Errorf("gagal enable pgcrypto: %v", err)
+	}
+	log.Println("pgcrypto extension aktif ✔")
+
+	// 3. MIGRATION
+	log.Println("⏳ Migrating PostgreSQL...")
+
 	err = pgDB.AutoMigrate(
-		&model.User{},
 		&model.Role{},
 		&model.Permission{},
+		&model.User{},
 		&model.Student{},
 		&model.Lecturer{},
 		&model.AchievementReference{},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("gagal migrasi database: %v", err)
+		log.Fatalf("❌ Migration error: %v", err)
 	}
 
-	// 2. Setup MongoDB
-	mongoURI := os.Getenv("MONGO_URI")
+	log.Println("✅ Migration complete")
+
+	// 4. KONEKSI MONGODB
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	clientOptions := options.Client().ApplyURI(mongoURI)
-	mongoClient, err := mongo.Connect(ctx, clientOptions)
+	mongoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_URI")))
 	if err != nil {
 		return nil, fmt.Errorf("gagal koneksi ke mongo: %v", err)
 	}
 
-	err = mongoClient.Ping(ctx, nil)
-	if err != nil {
+	if err := mongoClient.Ping(ctx, readpref.Primary()); err != nil {
 		return nil, fmt.Errorf("gagal ping mongo: %v", err)
 	}
 
-	mongoDBName := os.Getenv("MONGO_DB_NAME")
-	mongoDatabase := mongoClient.Database(mongoDBName)
+	mongoDB := mongoClient.Database(os.Getenv("MONGO_DB_NAME"))
 
-	log.Println("Berhasil terhubung ke PostgreSQL dan MongoDB!")
+	// 5. OPSIONAL: BUAT INDEX UNTUK COLLECTION achievements
+	//    - studentId: untuk query list prestasi per mahasiswa
+	//    - details.customFields.isDeleted: untuk filter soft-delete
+	achievementsCol := mongoDB.Collection("achievements")
+	indexView := achievementsCol.Indexes()
+	_, err = indexView.CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "studentId", Value: 1}},
+		},
+		{
+			Keys: bson.D{{Key: "details.customFields.isDeleted", Value: 1}},
+		},
+	})
+	if err != nil {
+		log.Printf("[MONGO] Gagal membuat index achievements: %v", err)
+	} else {
+		log.Println("[MONGO] Index achievements siap ✔")
+	}
+
+	log.Println("Berhasil terhubung ke PostgreSQL & MongoDB! ✔")
 
 	return &Database{
 		Postgres: pgDB,
-		Mongo:    mongoDatabase,
+		Mongo:    mongoDB,
 	}, nil
 }
