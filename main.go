@@ -14,54 +14,79 @@ import (
 )
 
 func main() {
+
+	// =================================================================
 	// LOAD ENV
+	// =================================================================
 	if err := godotenv.Load(); err != nil {
 		log.Println("⚠️  .env tidak ditemukan, menggunakan environment default")
 	}
 
-	// INIT DATABASE (PostgreSQL + MongoDB)
+	// =================================================================
+	// INIT DB (POSTGRES + MONGODB)
+	// =================================================================
 	dbConn, err := database.InitDB()
 	if err != nil {
 		log.Fatalf("❌ Gagal koneksi database: %v", err)
 	}
 
-	// SEED DATA AWAL (roles, users, students, dll.)
-	database.RunSeeders(dbConn.Postgres)
+	// =================================================================
+	// SEED DATA (ROLES + USERS ­— optional untuk awal)
+	// =================================================================
+	database.SeedRoles(dbConn.Postgres)
+	database.SeedUsers(dbConn.Postgres)
 
-	// REPOSITORY LAYER
+	// =================================================================
+	// REPOSITORIES
+	// =================================================================
 	userRepo := repository.NewUserRepository(dbConn.Postgres)
 	achievementRepo := repository.NewAchievementRepository(dbConn.Postgres, dbConn.Mongo)
 	lecturerRepo := repository.NewLecturerRepository(dbConn.Postgres)
-	userAdminRepo := repository.NewUserAdminRepository(dbConn.Postgres)
+	adminRepo := repository.NewUserAdminRepository(dbConn.Postgres)
 
-	// SERVICE LAYER
+	// =================================================================
+	// SERVICES
+	// =================================================================
 	authService := service.NewAuthService(userRepo)
-	achievementService := service.NewAchievementService(achievementRepo, lecturerRepo)
-	adminService := service.NewAdminService(userAdminRepo)
+	adminService := service.NewAdminService(adminRepo)
 
-	// ROUTES
+	achievementService := service.NewAchievementService(
+		achievementRepo,
+		userRepo,
+		lecturerRepo,
+	)
+
+	// =================================================================
+	// ROUTER
+	// =================================================================
 	r := gin.Default()
 
+	// -- Auth route
 	routes.AuthRoutes(r, authService)
-	routes.AchievementRoutes(r, achievementService)
+
+	// -- Admin management (FR-009)
 	routes.AdminRoutes(r, adminService)
 
-	// Root endpoint (opsional)
+	// -- Achievement FR-003 s/d FR-010
+	routes.AchievementRoutes(r, achievementService)
+
+	// (optional) root endpoint
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"message": "Student Achievement API RUNNING",
+			"message": "Student Achievement API Running",
 			"version": "1.0.0",
 		})
 	})
 
+	// =================================================================
 	// START SERVER
+	// =================================================================
 	port := os.Getenv("APP_PORT")
 	if port == "" {
 		port = "8080"
 	}
 
 	log.Println("🚀 Server running at http://localhost:" + port)
-
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("❌ Gagal menjalankan server: %v", err)
 	}

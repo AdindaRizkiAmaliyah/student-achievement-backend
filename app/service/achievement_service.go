@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"student-achievement-backend/app/model"
@@ -13,70 +14,91 @@ import (
 	"github.com/google/uuid"
 )
 
-// AchievementService mendefinisikan behavior fitur prestasi (FR-003 s.d. FR-008).
+// AchievementService mendefinisikan handler untuk fitur prestasi FR-003 s/d FR-010.
 type AchievementService interface {
-	// CreateAchievement digunakan mahasiswa untuk membuat draft prestasi (FR-003).
+	// FR-003: CreateAchievement — mahasiswa membuat prestasi (status draft).
 	CreateAchievement(ctx *gin.Context)
-	// SubmitForVerification digunakan mahasiswa untuk submit prestasi ke dosen wali (FR-004).
+	// FR-004: SubmitForVerification — mahasiswa submit draft untuk diverifikasi.
 	SubmitForVerification(ctx *gin.Context)
-	// DeleteAchievement digunakan mahasiswa untuk menghapus prestasi draft (FR-005).
+	// FR-005: DeleteAchievement — mahasiswa menghapus prestasi draft (soft delete).
 	DeleteAchievement(ctx *gin.Context)
-	// GetAchievementsByStudent:
-	//   - mahasiswa: list prestasi sendiri
-	//   - dosen_wali: list prestasi mahasiswa bimbingan (FR-006)
-	GetAchievementsByStudent(ctx *gin.Context)
-	// VerifyAchievement digunakan dosen wali untuk memverifikasi prestasi mahasiswa (FR-007).
+	// FR-006, FR-007, FR-008, FR-010: GetAchievements — list prestasi tergantung role.
+	GetAchievements(ctx *gin.Context)
+	// FR-007: VerifyAchievement — dosen wali memverifikasi prestasi.
 	VerifyAchievement(ctx *gin.Context)
-	// RejectAchievement digunakan dosen wali untuk menolak prestasi mahasiswa (FR-008).
+	// FR-008: RejectAchievement — dosen wali menolak prestasi dengan catatan.
 	RejectAchievement(ctx *gin.Context)
 }
 
 // achievementService adalah implementasi konkret AchievementService.
 type achievementService struct {
 	repo         repository.AchievementRepository
-	lecturerRepo repository.LecturerRepository
+	userRepo     repository.UserRepository
+	lecturerRepo repository.LecturerRepository // dipakai untuk FR-006/007/008 (advisor)
 }
 
-// NewAchievementService membuat instance baru achievementService.
+// NewAchievementService membuat instance baru AchievementService.
 func NewAchievementService(
 	repo repository.AchievementRepository,
+	userRepo repository.UserRepository,
 	lecturerRepo repository.LecturerRepository,
 ) AchievementService {
 	return &achievementService{
 		repo:         repo,
+		userRepo:     userRepo,
 		lecturerRepo: lecturerRepo,
 	}
 }
 
-// customError dipakai untuk pesan error internal sederhana.
+// customError sederhana agar bisa dibedakan kalau studentID tidak ada di context.
 type customError struct{ msg string }
 
-// Error mengembalikan pesan error untuk customError.
 func (e *customError) Error() string { return e.msg }
 
-// ErrNoStudentIDInContext dipakai ketika context tidak memiliki studentID.
 var ErrNoStudentIDInContext = &customError{msg: "studentID not found in context (ensure middleware sets studentID)"}
 
-// getStudentIDFromContext mengambil studentID dari context (di-set oleh AuthMiddleware).
+// getStudentIDFromContext mengambil studentID dari JWT (kalau role mahasiswa).
 func getStudentIDFromContext(ctx *gin.Context) (uuid.UUID, error) {
 	if v, ok := ctx.Get("studentID"); ok {
 		if sid, ok2 := v.(uuid.UUID); ok2 {
 			return sid, nil
 		}
 	}
+	return uuid.Nil, ErrNoStudentIDInContext
+}
+
+// getUserIDFromContext mengambil userID dari JWT.
+func getUserIDFromContext(ctx *gin.Context) (uuid.UUID, error) {
 	if v, ok := ctx.Get("userID"); ok {
 		if uid, ok2 := v.(uuid.UUID); ok2 {
 			return uid, nil
 		}
 	}
-	return uuid.Nil, ErrNoStudentIDInContext
+	return uuid.Nil, &customError{msg: "userID not found in context"}
 }
 
-// CreateAchievement:
-// - Hanya mahasiswa (studentID wajib ada di token).
-// - Simpan dokumen ke MongoDB + referensi ke PostgreSQL (status draft).
-// - Sesuai FR-003 di SRS.
+// getRoleFromContext membaca role dari JWT.
+func getRoleFromContext(ctx *gin.Context) string {
+	if v, ok := ctx.Get("role"); ok {
+		if r, ok2 := v.(string); ok2 {
+			return r
+		}
+	}
+	return ""
+}
+
+// ===============================================================
+//  FR-003: CreateAchievement (Mahasiswa)
+//  Endpoint: POST /api/v1/achievements
+// ===============================================================
 func (s *achievementService) CreateAchievement(ctx *gin.Context) {
+	role := getRoleFromContext(ctx)
+	if role != "mahasiswa" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya mahasiswa yang dapat membuat prestasi", "forbidden", nil))
+		return
+	}
+
 	studentID, err := getStudentIDFromContext(ctx)
 	if err != nil || studentID == uuid.Nil {
 		ctx.JSON(http.StatusUnauthorized,
@@ -102,7 +124,6 @@ func (s *achievementService) CreateAchievement(ctx *gin.Context) {
 
 	now := time.Now()
 
-	// Data referensi di PostgreSQL (tabel achievement_references).
 	pg := model.AchievementReference{
 		StudentID:          studentID,
 		MongoAchievementID: "",
@@ -111,7 +132,6 @@ func (s *achievementService) CreateAchievement(ctx *gin.Context) {
 		UpdatedAt:          now,
 	}
 
-	// Data detail di MongoDB (collection achievements).
 	mongo := model.Achievement{
 		StudentID:       studentID,
 		AchievementType: input.AchievementType,
@@ -139,11 +159,18 @@ func (s *achievementService) CreateAchievement(ctx *gin.Context) {
 		}))
 }
 
-// SubmitForVerification:
-// - Hanya mahasiswa pemilik prestasi.
-// - Hanya bisa dari status draft → submitted.
-// - Sesuai FR-004 di SRS.
+// ===============================================================
+//  FR-004: SubmitForVerification (Mahasiswa)
+//  Endpoint: POST /api/v1/achievements/:id/submit
+// ===============================================================
 func (s *achievementService) SubmitForVerification(ctx *gin.Context) {
+	role := getRoleFromContext(ctx)
+	if role != "mahasiswa" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya mahasiswa yang dapat submit prestasi", "forbidden", nil))
+		return
+	}
+
 	studentID, err := getStudentIDFromContext(ctx)
 	if err != nil || studentID == uuid.Nil {
 		ctx.JSON(http.StatusUnauthorized,
@@ -187,12 +214,18 @@ func (s *achievementService) SubmitForVerification(ctx *gin.Context) {
 		utils.BuildResponseSuccess("Prestasi berhasil disubmit", nil))
 }
 
-// DeleteAchievement:
-// - Hanya mahasiswa pemilik prestasi.
-// - Hanya untuk status draft.
-// - Status di Postgres → deleted, di Mongo → flag deleted (handle di repo).
-// - Sesuai FR-005 di SRS (+ enum tambahan deleted sesuai revisi).
+// ===============================================================
+//  FR-005: DeleteAchievement (Mahasiswa, status draft)
+//  Endpoint: DELETE /api/v1/achievements/:id
+// ===============================================================
 func (s *achievementService) DeleteAchievement(ctx *gin.Context) {
+	role := getRoleFromContext(ctx)
+	if role != "mahasiswa" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya mahasiswa yang dapat menghapus prestasi", "forbidden", nil))
+		return
+	}
+
 	studentID, err := getStudentIDFromContext(ctx)
 	if err != nil || studentID == uuid.Nil {
 		ctx.JSON(http.StatusUnauthorized,
@@ -236,113 +269,184 @@ func (s *achievementService) DeleteAchievement(ctx *gin.Context) {
 		utils.BuildResponseSuccess("Prestasi berhasil dihapus", nil))
 }
 
-// GetAchievementsByStudent:
-// - Mahasiswa: melihat daftar prestasi miliknya sendiri.
-// - Dosen wali: melihat prestasi semua mahasiswa bimbingan (advisor_id = lecturer.id).
-// - Sesuai FR-006 di SRS, endpoint tetap: GET /api/v1/achievements.
-func (s *achievementService) GetAchievementsByStudent(ctx *gin.Context) {
-	roleVal, _ := ctx.Get("role")
-	role, _ := roleVal.(string)
+// ===============================================================
+//  Helper: buildAchievementListItem
+//  Membantu membentuk 1 item response list prestasi (reference + detail).
+// ===============================================================
+func (s *achievementService) buildAchievementListItem(ctx *gin.Context, ref model.AchievementReference) map[string]any {
+	item := map[string]any{
+		"id":          ref.ID,
+		"studentId":   ref.StudentID,
+		"status":      ref.Status,
+		"createdAt":   ref.CreatedAt,
+		"submittedAt": ref.SubmittedAt,
+		"verifiedAt":  ref.VerifiedAt,
+	}
 
-	userIDVal, _ := ctx.Get("userID")
-	userID, _ := userIDVal.(uuid.UUID)
+	if ref.VerifiedBy != nil {
+		item["verifiedBy"] = ref.VerifiedBy
+	}
 
-	var (
-		refs []model.AchievementReference
-		err  error
-	)
+	// Ambil detail dari MongoDB
+	if md, err := s.repo.FindDetailByMongoID(ctx, ref.MongoAchievementID); err == nil && md != nil {
+		item["title"] = md.Title
+		item["type"] = md.AchievementType
+		item["points"] = md.Points
+		item["tags"] = md.Tags
+	}
+
+	return item
+}
+
+// ===============================================================
+//  FR-006 / FR-007 / FR-008 / FR-010: GetAchievements
+//  Endpoint: GET /api/v1/achievements
+//
+//  Perilaku per role:
+//    - Mahasiswa: daftar prestasi miliknya (FR-006 dari sisi mahasiswa)
+//    - Dosen Wali: daftar prestasi mahasiswa bimbingan (FR-006)
+//    - Admin: lihat semua prestasi (FR-010, dengan filter & pagination)
+// ===============================================================
+func (s *achievementService) GetAchievements(ctx *gin.Context) {
+	role := getRoleFromContext(ctx)
 
 	switch role {
+
+	// ================= Mahasiswa =================
 	case "mahasiswa":
-		// Flow mahasiswa: hanya prestasi dirinya sendiri.
 		studentID, err := getStudentIDFromContext(ctx)
 		if err != nil || studentID == uuid.Nil {
 			ctx.JSON(http.StatusUnauthorized,
 				utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
 			return
 		}
-		refs, err = s.repo.FindByStudentID(studentID.String())
 
+		refs, err := s.repo.FindByStudentID(studentID.String())
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError,
+				utils.BuildResponseFailed("Gagal mengambil prestasi", err.Error(), nil))
+			return
+		}
+
+		var list []map[string]any
+		for _, r := range refs {
+			list = append(list, s.buildAchievementListItem(ctx, r))
+		}
+
+		ctx.JSON(http.StatusOK,
+			utils.BuildResponseSuccess("Berhasil mengambil daftar prestasi mahasiswa", list))
+		return
+
+	// ================= Dosen Wali =================
 	case "dosen_wali":
-		// Flow dosen wali: seluruh prestasi mahasiswa bimbingan.
-		if userID == uuid.Nil {
+		// Di sini kita asumsi kamu sudah punya mekanisme:
+		// - dari userID dosen wali -> lecturerID -> daftar studentIDs bimbingan.
+		// Karena implementasinya berbeda-beda, aku jelaskan alurnya:
+
+		userID, err := getUserIDFromContext(ctx)
+		if err != nil || userID == uuid.Nil {
 			ctx.JSON(http.StatusUnauthorized,
 				utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
 			return
 		}
 
-		lec, errLec := s.lecturerRepo.FindByUserID(userID)
-		if errLec != nil {
+		// Ambil lecturer berdasarkan userID
+		lecturer, err := s.lecturerRepo.FindByUserID(userID)
+		if err != nil {
 			ctx.JSON(http.StatusForbidden,
-				utils.BuildResponseFailed("Data dosen wali tidak ditemukan", errLec.Error(), nil))
+				utils.BuildResponseFailed("Data dosen wali tidak ditemukan", err.Error(), nil))
 			return
 		}
 
-		refs, err = s.repo.FindByAdvisorID(lec.ID)
+		// Ambil semua studentID bimbingan dosen wali ini
+		studentIDs, err := s.lecturerRepo.GetAdviseeStudentIDs(lecturer.ID)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError,
+				utils.BuildResponseFailed("Gagal mengambil daftar mahasiswa bimbingan", err.Error(), nil))
+			return
+		}
+
+		// Ambil semua achievement_references untuk daftar studentID tersebut
+		refs, err := s.lecturerRepo.FindAchievementsByStudentIDs(ctx, studentIDs)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError,
+				utils.BuildResponseFailed("Gagal mengambil prestasi mahasiswa bimbingan", err.Error(), nil))
+			return
+		}
+
+		var list []map[string]any
+		for _, r := range refs {
+			list = append(list, s.buildAchievementListItem(ctx, r))
+		}
+
+		ctx.JSON(http.StatusOK,
+			utils.BuildResponseSuccess("Berhasil mengambil daftar prestasi mahasiswa bimbingan", list))
+		return
+
+	// ================= Admin (FR-010) =================
+	case "admin":
+		// Query params: ?status=submitted&page=1&limit=10
+		statusParam := ctx.Query("status")
+		var status *string
+		if statusParam != "" {
+			status = &statusParam
+		}
+
+		page, _ := strconv.Atoi(ctx.DefaultQuery("page", "1"))
+		limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
+
+		refs, total, err := s.repo.FindAll(status, page, limit)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError,
+				utils.BuildResponseFailed("Gagal mengambil daftar semua prestasi", err.Error(), nil))
+			return
+		}
+
+		var list []map[string]any
+		for _, r := range refs {
+			list = append(list, s.buildAchievementListItem(ctx, r))
+		}
+
+		meta := map[string]any{
+			"page":      page,
+			"limit":     limit,
+			"totalData": total,
+			"totalPage": (total + int64(limit) - 1) / int64(limit),
+		}
+
+		ctx.JSON(http.StatusOK,
+			utils.BuildResponseSuccess("Berhasil mengambil semua prestasi (admin)", map[string]any{
+				"items": list,
+				"meta":  meta,
+			}))
+		return
 
 	default:
-		// Role lain (misal admin) belum di-handle di endpoint ini.
 		ctx.JSON(http.StatusForbidden,
-			utils.BuildResponseFailed("Role tidak diizinkan mengakses daftar prestasi", "role_not_supported", nil))
+			utils.BuildResponseFailed("Role tidak dikenali untuk akses daftar prestasi", "forbidden", nil))
 		return
 	}
-
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError,
-			utils.BuildResponseFailed("Gagal mengambil prestasi", err.Error(), nil))
-		return
-	}
-
-	// Bentuk response: ringkasan + detail dari Mongo (jika ada).
-	var list []map[string]any
-	for _, r := range refs {
-		item := map[string]any{
-			"id":          r.ID,
-			"status":      r.Status,
-			"createdAt":   r.CreatedAt,
-			"submittedAt": r.SubmittedAt,
-			"studentId":   r.StudentID,
-		}
-
-		if md, err := s.repo.FindDetailByMongoID(ctx.Request.Context(), r.MongoAchievementID); err == nil && md != nil {
-			item["title"] = md.Title
-			item["type"] = md.AchievementType
-			item["points"] = md.Points
-		}
-
-		list = append(list, item)
-	}
-
-	ctx.JSON(http.StatusOK,
-		utils.BuildResponseSuccess("Berhasil mengambil daftar prestasi", list))
 }
 
-// VerifyAchievement:
-// - Hanya untuk role = dosen_wali.
-// - Precondition: status prestasi = 'submitted'.
-// - Hanya boleh memverifikasi prestasi mahasiswa bimbingannya (advisor_id = dosen wali).
-// - Update status → 'verified', set verified_by & verified_at di repo.
-// - Sesuai FR-007 di SRS.
+// ===============================================================
+//  FR-007: VerifyAchievement (Dosen Wali)
+//  Endpoint: POST /api/v1/achievements/:id/verify
+// ===============================================================
 func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
-	// Pastikan role = dosen_wali.
-	roleVal, _ := ctx.Get("role")
-	role, _ := roleVal.(string)
+	role := getRoleFromContext(ctx)
 	if role != "dosen_wali" {
 		ctx.JSON(http.StatusForbidden,
-			utils.BuildResponseFailed("Hanya dosen wali yang dapat memverifikasi prestasi", "role_not_allowed", nil))
+			utils.BuildResponseFailed("Hanya dosen wali yang dapat memverifikasi prestasi", "forbidden", nil))
 		return
 	}
 
-	// Ambil userID dosen dari token.
-	userIDVal, _ := ctx.Get("userID")
-	userID, _ := userIDVal.(uuid.UUID)
-	if userID == uuid.Nil {
+	userID, err := getUserIDFromContext(ctx)
+	if err != nil || userID == uuid.Nil {
 		ctx.JSON(http.StatusUnauthorized,
 			utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
 		return
 	}
 
-	// Ambil data dosen wali dari tabel lecturers (berdasarkan user_id).
 	lecturer, err := s.lecturerRepo.FindByUserID(userID)
 	if err != nil {
 		ctx.JSON(http.StatusForbidden,
@@ -350,7 +454,6 @@ func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Ambil ID prestasi dari path parameter.
 	id := ctx.Param("id")
 	if id == "" {
 		ctx.JSON(http.StatusBadRequest,
@@ -358,7 +461,6 @@ func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Ambil referensi prestasi dari PostgreSQL.
 	ref, err := s.repo.FindByID(id)
 	if err != nil {
 		ctx.JSON(http.StatusNotFound,
@@ -366,74 +468,52 @@ func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Precondition: status harus 'submitted'.
+	// Cek apakah mahasiswa ini benar advisee doswal tersebut
+	ok, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
+	if err != nil || !ok {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Prestasi bukan milik mahasiswa bimbingan Anda", "forbidden", nil))
+		return
+	}
+
 	if ref.Status != "submitted" {
 		ctx.JSON(http.StatusBadRequest,
-			utils.BuildResponseFailed("Prestasi hanya bisa diverifikasi jika status 'submitted'", "invalid_status", nil))
+			utils.BuildResponseFailed("Hanya prestasi berstatus 'submitted' yang dapat diverifikasi", "invalid_status", nil))
 		return
 	}
 
-	// Pastikan mahasiswa pemilik prestasi adalah bimbingan dosen ini.
-	isAdvisee, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError,
-			utils.BuildResponseFailed("Gagal memeriksa relasi dosen wali", err.Error(), nil))
-		return
-	}
-	if !isAdvisee {
-		ctx.JSON(http.StatusForbidden,
-			utils.BuildResponseFailed("Prestasi ini bukan milik mahasiswa bimbingan Anda", "not_advisee", nil))
-		return
-	}
-
-	// Set verifierID = userID dosen wali (kolom verified_by di Postgres).
-	verifierIDStr := userID.String()
-	opts := repository.UpdateStatusOptions{
-		VerifierID: &verifierIDStr,
-	}
-
-	// Update status → verified (verified_at & verified_by dihandle di repository.UpdateStatus).
-	if err := s.repo.UpdateStatus(id, "verified", opts); err != nil {
+	verifierID := userID.String()
+	if err := s.repo.UpdateStatus(id, "verified", repository.UpdateStatusOptions{
+		VerifierID: &verifierID,
+	}); err != nil {
 		ctx.JSON(http.StatusInternalServerError,
 			utils.BuildResponseFailed("Gagal memverifikasi prestasi", err.Error(), nil))
 		return
 	}
 
-	// Response ringkas sesuai SRS: return updated status.
 	ctx.JSON(http.StatusOK,
-		utils.BuildResponseSuccess("Prestasi berhasil diverifikasi", map[string]any{
-			"id":     ref.ID,
-			"status": "verified",
-		}))
+		utils.BuildResponseSuccess("Prestasi berhasil diverifikasi", nil))
 }
 
-// RejectAchievement:
-// - Hanya untuk role = dosen_wali.
-// - Precondition: status prestasi = 'submitted'.
-// - Hanya boleh menolak prestasi mahasiswa bimbingannya.
-// - Wajib menerima catatan penolakan (rejectionNote) dari body.
-// - Update status → 'rejected', set verified_by, verified_at, dan rejection_note.
-// - Sesuai FR-008 di SRS.
+// ===============================================================
+//  FR-008: RejectAchievement (Dosen Wali)
+//  Endpoint: POST /api/v1/achievements/:id/reject
+// ===============================================================
 func (s *achievementService) RejectAchievement(ctx *gin.Context) {
-	// Pastikan role = dosen_wali.
-	roleVal, _ := ctx.Get("role")
-	role, _ := roleVal.(string)
+	role := getRoleFromContext(ctx)
 	if role != "dosen_wali" {
 		ctx.JSON(http.StatusForbidden,
-			utils.BuildResponseFailed("Hanya dosen wali yang dapat menolak prestasi", "role_not_allowed", nil))
+			utils.BuildResponseFailed("Hanya dosen wali yang dapat menolak prestasi", "forbidden", nil))
 		return
 	}
 
-	// Ambil userID dosen dari token.
-	userIDVal, _ := ctx.Get("userID")
-	userID, _ := userIDVal.(uuid.UUID)
-	if userID == uuid.Nil {
+	userID, err := getUserIDFromContext(ctx)
+	if err != nil || userID == uuid.Nil {
 		ctx.JSON(http.StatusUnauthorized,
 			utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
 		return
 	}
 
-	// Ambil data dosen wali dari tabel lecturers.
 	lecturer, err := s.lecturerRepo.FindByUserID(userID)
 	if err != nil {
 		ctx.JSON(http.StatusForbidden,
@@ -441,7 +521,6 @@ func (s *achievementService) RejectAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Ambil ID prestasi dari path parameter.
 	id := ctx.Param("id")
 	if id == "" {
 		ctx.JSON(http.StatusBadRequest,
@@ -449,7 +528,6 @@ func (s *achievementService) RejectAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Ambil referensi prestasi dari PostgreSQL.
 	ref, err := s.repo.FindByID(id)
 	if err != nil {
 		ctx.JSON(http.StatusNotFound,
@@ -457,55 +535,41 @@ func (s *achievementService) RejectAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Precondition: status harus 'submitted' (sama seperti verifikasi).
+	ok, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
+	if err != nil || !ok {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Prestasi bukan milik mahasiswa bimbingan Anda", "forbidden", nil))
+		return
+	}
+
 	if ref.Status != "submitted" {
 		ctx.JSON(http.StatusBadRequest,
-			utils.BuildResponseFailed("Prestasi hanya bisa ditolak jika status 'submitted'", "invalid_status", nil))
+			utils.BuildResponseFailed("Hanya prestasi berstatus 'submitted' yang dapat ditolak", "invalid_status", nil))
 		return
 	}
 
-	// Pastikan mahasiswa pemilik prestasi adalah bimbingan dosen ini.
-	isAdvisee, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError,
-			utils.BuildResponseFailed("Gagal memeriksa relasi dosen wali", err.Error(), nil))
-		return
-	}
-	if !isAdvisee {
-		ctx.JSON(http.StatusForbidden,
-			utils.BuildResponseFailed("Prestasi ini bukan milik mahasiswa bimbingan Anda", "not_advisee", nil))
-		return
-	}
-
-	// Bind body: wajib ada catatan penolakan.
 	var input struct {
 		RejectionNote string `json:"rejectionNote" binding:"required"`
 	}
+
 	if err := ctx.ShouldBindJSON(&input); err != nil {
 		ctx.JSON(http.StatusBadRequest,
-			utils.BuildResponseFailed("Catatan penolakan diperlukan", err.Error(), nil))
+			utils.BuildResponseFailed("Catatan penolakan wajib diisi", err.Error(), nil))
 		return
 	}
 
-	// Siapkan opsi untuk repository: verified_by + rejection_note.
-	verifierIDStr := userID.String()
-	opts := repository.UpdateStatusOptions{
-		VerifierID:    &verifierIDStr,
-		RejectionNote: &input.RejectionNote,
-	}
+	verifierID := userID.String()
+	note := input.RejectionNote
 
-	// Update status → rejected.
-	if err := s.repo.UpdateStatus(id, "rejected", opts); err != nil {
+	if err := s.repo.UpdateStatus(id, "rejected", repository.UpdateStatusOptions{
+		VerifierID:    &verifierID,
+		RejectionNote: &note,
+	}); err != nil {
 		ctx.JSON(http.StatusInternalServerError,
 			utils.BuildResponseFailed("Gagal menolak prestasi", err.Error(), nil))
 		return
 	}
 
-	// Response ringkas: id + status + catatan penolakan.
 	ctx.JSON(http.StatusOK,
-		utils.BuildResponseSuccess("Prestasi berhasil ditolak", map[string]any{
-			"id":            ref.ID,
-			"status":        "rejected",
-			"rejectionNote": input.RejectionNote,
-		}))
+		utils.BuildResponseSuccess("Prestasi berhasil ditolak", nil))
 }

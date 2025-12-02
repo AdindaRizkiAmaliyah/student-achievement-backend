@@ -8,68 +8,57 @@ import (
 
 	"student-achievement-backend/app/model"
 
-	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gorm.io/gorm"
+	"github.com/google/uuid"
 )
 
-// AchievementRepository mendefinisikan operasi yang berhubungan dengan prestasi
-// dan referensinya di Postgres + datanya di MongoDB.
+// AchievementRepository mendefinisikan operasi data prestasi
+// yang menyentuh 2 database: PostgreSQL (reference) & MongoDB (detail).
 type AchievementRepository interface {
-	// Create menyimpan data prestasi:
-	// - insert dokumen ke MongoDB
-	// - insert referensi ke PostgreSQL (AchievementReference)
+	// Create: simpan prestasi baru ke MongoDB lalu buat reference di PostgreSQL.
 	Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error
-
-	// FindByID mengambil 1 AchievementReference berdasarkan ID di PostgreSQL.
+	// FindByID: ambil 1 reference prestasi berdasarkan ID UUID (Postgres).
 	FindByID(id string) (*model.AchievementReference, error)
-
-	// UpdateStatus mengubah status prestasi (draft, submitted, verified, rejected, deleted)
-	// sekaligus mengelola kolom terkait (submitted_at, verified_at, rejection_note, dll).
+	// UpdateStatus: update status + field terkait (submitted_at, verified_at, dsb).
 	UpdateStatus(id string, status string, opts UpdateStatusOptions) error
-
-	// FindByStudentID mengambil seluruh AchievementReference milik mahasiswa tertentu (kecuali yang status deleted).
+	// FindByStudentID: ambil semua reference prestasi milik 1 mahasiswa (kecuali deleted).
 	FindByStudentID(studentID string) ([]model.AchievementReference, error)
-
-	// FindByAdvisorID mengambil seluruh AchievementReference milik mahasiswa
-	// yang dibimbing oleh dosen wali tertentu (advisor_id = lecturerID).
-	FindByAdvisorID(advisorID uuid.UUID) ([]model.AchievementReference, error)
-
-	// FindDetailByMongoID mengambil dokumen prestasi dari MongoDB berdasarkan MongoAchievementID.
+	// FindDetailByMongoID: ambil detail prestasi dari MongoDB berdasarkan ObjectID (hex).
 	FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error)
+	// FindAll: FR-010 — ambil semua prestasi (opsional filter status + pagination).
+	FindAll(status *string, page, limit int) ([]model.AchievementReference, int64, error)
 }
 
-// UpdateStatusOptions menampung opsi ekstra ketika update status prestasi.
+// UpdateStatusOptions menyimpan opsi tambahan ketika update status prestasi.
 type UpdateStatusOptions struct {
 	VerifierID    *string
 	RejectionNote *string
 }
 
+// achievementRepository adalah implementasi konkret AchievementRepository.
 type achievementRepository struct {
 	pgDB    *gorm.DB
 	mongoDB *mongo.Database
 }
 
-// NewAchievementRepository membuat instance repository prestasi.
+// NewAchievementRepository membuat instance repository baru.
 func NewAchievementRepository(pgDB *gorm.DB, mongoDB *mongo.Database) AchievementRepository {
-	return &achievementRepository{pgDB: pgDB, mongoDB: mongoDB}
+	return &achievementRepository{pgDB, mongoDB}
 }
 
-// Daftar status yang diperbolehkan (sesuai SRS + revisi deleted).
+// validStatuses: daftar status yang diizinkan (sesuai SRS + tambahan 'deleted').
 var validStatuses = map[string]bool{
 	"draft":     true,
 	"submitted": true,
 	"verified":  true,
 	"rejected":  true,
-	"deleted":   true,
+	"deleted":   true, // tambahan enum baru
 }
 
-// Create:
-// 1. Insert dokumen ke MongoDB (collection: achievements).
-// 2. Simpan ID Mongo ke MongoAchievementID di AchievementReference.
-// 3. Insert AchievementReference ke PostgreSQL (dalam transaksi).
+// Create menyimpan prestasi baru ke MongoDB lalu membuat reference di PostgreSQL.
 func (r *achievementRepository) Create(ctx context.Context, pgData *model.AchievementReference, mongoData *model.Achievement) error {
 	if pgData == nil || pgData.StudentID == uuid.Nil {
 		return errors.New("StudentID harus di-set sebelum Create()")
@@ -80,19 +69,15 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 		return tx.Error
 	}
 
-	// Step 1: insert ke MongoDB terlebih dahulu
+	// 1. Insert ke MongoDB terlebih dahulu
 	insertRes, err := r.mongoDB.Collection("achievements").InsertOne(ctx, mongoData)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("mongo insert error: %w", err)
 	}
 
-	oid, ok := insertRes.InsertedID.(primitive.ObjectID)
-	if !ok {
-		tx.Rollback()
-		return fmt.Errorf("mongo insert returned non-ObjectID")
-	}
-
+	// 2. Dapatkan ObjectID lalu simpan ke kolom mongo_achievement_id di Postgres
+	oid := insertRes.InsertedID.(primitive.ObjectID)
 	pgData.MongoAchievementID = oid.Hex()
 
 	now := time.Now()
@@ -101,9 +86,9 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 	}
 	pgData.UpdatedAt = now
 
-	// Step 2: insert ke PostgreSQL
+	// 3. Insert ke PostgreSQL
 	if err := tx.Create(pgData).Error; err != nil {
-		// rollback Mongo jika insert Postgres gagal
+		// Jika gagal, hapus dokumen Mongo yang baru dibuat
 		_, _ = r.mongoDB.Collection("achievements").DeleteOne(ctx, bson.M{"_id": oid})
 		tx.Rollback()
 		return fmt.Errorf("postgres insert error: %w", err)
@@ -112,11 +97,12 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 	return tx.Commit().Error
 }
 
-// FindByID mengambil AchievementReference dari PostgreSQL berdasarkan ID.
+// FindByID mengambil 1 reference prestasi berdasarkan id UUID (Postgres).
 func (r *achievementRepository) FindByID(id string) (*model.AchievementReference, error) {
 	var ref model.AchievementReference
 	err := r.pgDB.
-		Preload("Verifier"). // preload user yang memverifikasi (jika ada)
+		Preload("Student").
+		Preload("Verifier").
 		Where("id = ?", id).
 		First(&ref).Error
 	if err != nil {
@@ -125,31 +111,31 @@ func (r *achievementRepository) FindByID(id string) (*model.AchievementReference
 	return &ref, nil
 }
 
-// UpdateStatus mengubah status prestasi di Postgres,
-// dan jika status = deleted, juga melakukan soft-delete di MongoDB.
+// UpdateStatus mengubah status prestasi dan field-field terkait.
 func (r *achievementRepository) UpdateStatus(id string, status string, opts UpdateStatusOptions) error {
 	if !validStatuses[status] {
 		return fmt.Errorf("invalid status: %s", status)
 	}
 
-	// Perlakuan khusus untuk status deleted:
+	// === Perlakuan khusus untuk status 'deleted' ===
 	if status == "deleted" {
-		// Cari dulu referensi di Postgres
+		// 1. Ambil reference terlebih dahulu
 		var ref model.AchievementReference
 		if err := r.pgDB.Where("id = ?", id).First(&ref).Error; err != nil {
 			return err
 		}
 
-		// Konversi hex ke ObjectID Mongo
+		// 2. Convert mongoAchievementID (hex) -> ObjectID
 		objID, err := primitive.ObjectIDFromHex(ref.MongoAchievementID)
 		if err != nil {
 			return err
 		}
 
+		// 3. Soft delete di Mongo: set field deleted=true, deletedAt=now
 		now := time.Now()
-		// Tandai dokumen Mongo sebagai deleted
 		res, err := r.mongoDB.Collection("achievements").
-			UpdateOne(context.Background(),
+			UpdateOne(
+				context.Background(),
 				bson.M{"_id": objID},
 				bson.M{"$set": bson.M{"deleted": true, "deletedAt": now}},
 			)
@@ -160,12 +146,13 @@ func (r *achievementRepository) UpdateStatus(id string, status string, opts Upda
 			return fmt.Errorf("mongo document not found for deletion")
 		}
 
-		// Update status di Postgres dalam transaksi
+		// 4. Update status di Postgres dalam transaksi
 		tx := r.pgDB.Begin()
 		if tx.Error != nil {
-			// rollback flag di Mongo
+			// rollback perubahan di Mongo
 			_, _ = r.mongoDB.Collection("achievements").
-				UpdateOne(context.Background(),
+				UpdateOne(
+					context.Background(),
 					bson.M{"_id": objID},
 					bson.M{"$unset": bson.M{"deleted": "", "deletedAt": ""}},
 				)
@@ -180,11 +167,11 @@ func (r *achievementRepository) UpdateStatus(id string, status string, opts Upda
 		if err := tx.Model(&model.AchievementReference{}).
 			Where("id = ?", id).
 			Updates(updates).Error; err != nil {
-
 			tx.Rollback()
 			// rollback Mongo
 			_, _ = r.mongoDB.Collection("achievements").
-				UpdateOne(context.Background(),
+				UpdateOne(
+					context.Background(),
 					bson.M{"_id": objID},
 					bson.M{"$unset": bson.M{"deleted": "", "deletedAt": ""}},
 				)
@@ -193,12 +180,13 @@ func (r *achievementRepository) UpdateStatus(id string, status string, opts Upda
 		return tx.Commit().Error
 	}
 
-	// Flow untuk status selain deleted
+	// === Flow umum untuk status selain 'deleted' ===
 	updates := map[string]interface{}{
 		"status":     status,
 		"updated_at": time.Now(),
 	}
 	now := time.Now()
+
 	switch status {
 	case "submitted":
 		updates["submitted_at"] = now
@@ -217,12 +205,13 @@ func (r *achievementRepository) UpdateStatus(id string, status string, opts Upda
 		}
 	}
 
-	return r.pgDB.Model(&model.AchievementReference{}).
+	return r.pgDB.
+		Model(&model.AchievementReference{}).
 		Where("id = ?", id).
 		Updates(updates).Error
 }
 
-// FindByStudentID mengambil semua prestasi milik 1 mahasiswa (kecuali yang sudah berstatus deleted).
+// FindByStudentID mengambil semua prestasi milik seorang mahasiswa (kecuali yang status 'deleted').
 func (r *achievementRepository) FindByStudentID(studentID string) ([]model.AchievementReference, error) {
 	var refs []model.AchievementReference
 	err := r.pgDB.
@@ -232,20 +221,7 @@ func (r *achievementRepository) FindByStudentID(studentID string) ([]model.Achie
 	return refs, err
 }
 
-// FindByAdvisorID mengambil semua prestasi dari mahasiswa yang dibimbing oleh satu dosen wali (advisor).
-// Implementasi: JOIN achievement_references dengan students berdasarkan student_id.
-func (r *achievementRepository) FindByAdvisorID(advisorID uuid.UUID) ([]model.AchievementReference, error) {
-	var refs []model.AchievementReference
-	err := r.pgDB.
-		Joins("JOIN students ON students.id = achievement_references.student_id").
-		Where("students.advisor_id = ? AND achievement_references.status != 'deleted'", advisorID).
-		Order("achievement_references.created_at DESC").
-		Find(&refs).Error
-	return refs, err
-}
-
-// FindDetailByMongoID mengambil dokumen prestasi (detail) dari MongoDB.
-// Hanya mengambil dokumen yang tidak memiliki flag deleted = true.
+// FindDetailByMongoID mengambil detail prestasi dari MongoDB berdasarkan _id ObjectID hex.
 func (r *achievementRepository) FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error) {
 	objID, err := primitive.ObjectIDFromHex(mongoID)
 	if err != nil {
@@ -253,10 +229,41 @@ func (r *achievementRepository) FindDetailByMongoID(ctx context.Context, mongoID
 	}
 	var achievement model.Achievement
 	err = r.mongoDB.Collection("achievements").
-		FindOne(ctx, bson.M{
-			"_id":     objID,
-			"deleted": bson.M{"$ne": true},
-		}).
+		FindOne(ctx, bson.M{"_id": objID, "deleted": bson.M{"$ne": true}}).
 		Decode(&achievement)
 	return &achievement, err
+}
+
+// FindAll mengembalikan daftar prestasi untuk admin (FR-010).
+// Mendukung:
+//   - filter status (?status=submitted)
+//   - pagination basic (?page=1&limit=10)
+func (r *achievementRepository) FindAll(status *string, page, limit int) ([]model.AchievementReference, int64, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+
+	db := r.pgDB.Model(&model.AchievementReference{})
+
+	if status != nil && *status != "" {
+		db = db.Where("status = ?", *status)
+	}
+
+	// Hitung total untuk pagination
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var refs []model.AchievementReference
+	err := db.
+		Order("created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&refs).Error
+
+	return refs, total, err
 }
