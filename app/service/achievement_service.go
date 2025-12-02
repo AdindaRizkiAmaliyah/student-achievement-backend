@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// AchievementService mendefinisikan behavior fitur prestasi (FR-003 s.d. FR-007).
+// AchievementService mendefinisikan behavior fitur prestasi (FR-003 s.d. FR-008).
 type AchievementService interface {
 	// CreateAchievement digunakan mahasiswa untuk membuat draft prestasi (FR-003).
 	CreateAchievement(ctx *gin.Context)
@@ -27,6 +27,8 @@ type AchievementService interface {
 	GetAchievementsByStudent(ctx *gin.Context)
 	// VerifyAchievement digunakan dosen wali untuk memverifikasi prestasi mahasiswa (FR-007).
 	VerifyAchievement(ctx *gin.Context)
+	// RejectAchievement digunakan dosen wali untuk menolak prestasi mahasiswa (FR-008).
+	RejectAchievement(ctx *gin.Context)
 }
 
 // achievementService adalah implementasi konkret AchievementService.
@@ -189,7 +191,7 @@ func (s *achievementService) SubmitForVerification(ctx *gin.Context) {
 // - Hanya mahasiswa pemilik prestasi.
 // - Hanya untuk status draft.
 // - Status di Postgres → deleted, di Mongo → flag deleted (handle di repo).
-// - Sesuai FR-005 di SRS (+ enum tambahan deleted sesuai revisi kamu).
+// - Sesuai FR-005 di SRS (+ enum tambahan deleted sesuai revisi).
 func (s *achievementService) DeleteAchievement(ctx *gin.Context) {
 	studentID, err := getStudentIDFromContext(ctx)
 	if err != nil || studentID == uuid.Nil {
@@ -364,7 +366,7 @@ func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
 		return
 	}
 
-	// Precondition: status harus 'submitted' (SRS FR-007).
+	// Precondition: status harus 'submitted'.
 	if ref.Status != "submitted" {
 		ctx.JSON(http.StatusBadRequest,
 			utils.BuildResponseFailed("Prestasi hanya bisa diverifikasi jika status 'submitted'", "invalid_status", nil))
@@ -402,5 +404,108 @@ func (s *achievementService) VerifyAchievement(ctx *gin.Context) {
 		utils.BuildResponseSuccess("Prestasi berhasil diverifikasi", map[string]any{
 			"id":     ref.ID,
 			"status": "verified",
+		}))
+}
+
+// RejectAchievement:
+// - Hanya untuk role = dosen_wali.
+// - Precondition: status prestasi = 'submitted'.
+// - Hanya boleh menolak prestasi mahasiswa bimbingannya.
+// - Wajib menerima catatan penolakan (rejectionNote) dari body.
+// - Update status → 'rejected', set verified_by, verified_at, dan rejection_note.
+// - Sesuai FR-008 di SRS.
+func (s *achievementService) RejectAchievement(ctx *gin.Context) {
+	// Pastikan role = dosen_wali.
+	roleVal, _ := ctx.Get("role")
+	role, _ := roleVal.(string)
+	if role != "dosen_wali" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya dosen wali yang dapat menolak prestasi", "role_not_allowed", nil))
+		return
+	}
+
+	// Ambil userID dosen dari token.
+	userIDVal, _ := ctx.Get("userID")
+	userID, _ := userIDVal.(uuid.UUID)
+	if userID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
+		return
+	}
+
+	// Ambil data dosen wali dari tabel lecturers.
+	lecturer, err := s.lecturerRepo.FindByUserID(userID)
+	if err != nil {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Data dosen wali tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	// Ambil ID prestasi dari path parameter.
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	// Ambil referensi prestasi dari PostgreSQL.
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	// Precondition: status harus 'submitted' (sama seperti verifikasi).
+	if ref.Status != "submitted" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Prestasi hanya bisa ditolak jika status 'submitted'", "invalid_status", nil))
+		return
+	}
+
+	// Pastikan mahasiswa pemilik prestasi adalah bimbingan dosen ini.
+	isAdvisee, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal memeriksa relasi dosen wali", err.Error(), nil))
+		return
+	}
+	if !isAdvisee {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Prestasi ini bukan milik mahasiswa bimbingan Anda", "not_advisee", nil))
+		return
+	}
+
+	// Bind body: wajib ada catatan penolakan.
+	var input struct {
+		RejectionNote string `json:"rejectionNote" binding:"required"`
+	}
+	if err := ctx.ShouldBindJSON(&input); err != nil {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Catatan penolakan diperlukan", err.Error(), nil))
+		return
+	}
+
+	// Siapkan opsi untuk repository: verified_by + rejection_note.
+	verifierIDStr := userID.String()
+	opts := repository.UpdateStatusOptions{
+		VerifierID:    &verifierIDStr,
+		RejectionNote: &input.RejectionNote,
+	}
+
+	// Update status → rejected.
+	if err := s.repo.UpdateStatus(id, "rejected", opts); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menolak prestasi", err.Error(), nil))
+		return
+	}
+
+	// Response ringkas: id + status + catatan penolakan.
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Prestasi berhasil ditolak", map[string]any{
+			"id":            ref.ID,
+			"status":        "rejected",
+			"rejectionNote": input.RejectionNote,
 		}))
 }

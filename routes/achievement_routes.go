@@ -28,7 +28,9 @@ func AchievementRoutes(r *gin.Engine, s service.AchievementService) {
 		auth.GET("/", s.GetAchievementsByStudent)
 
 		// FR-007: Verify achievement (Dosen Wali)
-		// Sesuai SRS: POST /api/v1/achievements/:id/verify
 		auth.POST("/:id/verify", s.VerifyAchievement)
+
+		// FR-008: Reject achievement (Dosen Wali)
+		auth.POST("/:id/reject", s.RejectAchievement)
 	}
 }
