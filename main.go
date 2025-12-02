@@ -31,7 +31,7 @@ func main() {
 	}
 
 	// =================================================================
-	// SEED DATA (ROLES + USERS ­— optional untuk awal)
+	// SEED DATA (ROLES + USERS)
 	// =================================================================
 	database.SeedRoles(dbConn.Postgres)
 	database.SeedUsers(dbConn.Postgres)
@@ -43,37 +43,41 @@ func main() {
 	achievementRepo := repository.NewAchievementRepository(dbConn.Postgres, dbConn.Mongo)
 	lecturerRepo := repository.NewLecturerRepository(dbConn.Postgres)
 	adminRepo := repository.NewUserAdminRepository(dbConn.Postgres)
+	reportRepo := repository.NewReportRepository(dbConn.Mongo)
 
 	// =================================================================
 	// SERVICES
 	// =================================================================
 	authService := service.NewAuthService(userRepo)
 	adminService := service.NewAdminService(adminRepo)
-
 	achievementService := service.NewAchievementService(
 		achievementRepo,
 		userRepo,
 		lecturerRepo,
 	)
+	reportService := service.NewReportService(reportRepo, lecturerRepo)
 
 	// =================================================================
 	// ROUTER
 	// =================================================================
 	r := gin.Default()
 
-	// -- Auth route
+	// Auth (FR-001)
 	routes.AuthRoutes(r, authService)
 
-	// -- Admin management (FR-009)
+	// Admin user management (FR-009)
 	routes.AdminRoutes(r, adminService)
 
-	// -- Achievement FR-003 s/d FR-010
+	// Achievements (FR-003 s.d. FR-010)
 	routes.AchievementRoutes(r, achievementService)
 
-	// (optional) root endpoint
+	// Reports & Analytics (FR-011)
+	routes.ReportRoutes(r, reportService)
+
+	// Root endpoint (optional)
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"message": "Student Achievement API Running",
+			"message": "Student Achievement API RUNNING",
 			"version": "1.0.0",
 		})
 	})
@@ -87,6 +91,7 @@ func main() {
 	}
 
 	log.Println("🚀 Server running at http://localhost:" + port)
+
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("❌ Gagal menjalankan server: %v", err)
 	}
