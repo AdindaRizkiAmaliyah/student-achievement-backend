@@ -7,23 +7,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AchievementRoutes mendaftarkan endpoint terkait prestasi mahasiswa.
-// Semua endpoint di sini wajib melalui AuthMiddleware (hanya user terautentikasi).
+// AchievementRoutes mendaftarkan semua endpoint terkait prestasi (FR-003 s.d. FR-007).
 func AchievementRoutes(r *gin.Engine, s service.AchievementService) {
-	// Sesuai SRS: prefix /api/v1/achievements
+	// Group dengan AuthMiddleware → semua endpoint butuh JWT.
 	auth := r.Group("/api/v1/achievements")
 	auth.Use(middleware.AuthMiddleware())
 	{
-		// FR-03: Create achievement (mahasiswa buat prestasi baru, status draft)
+		// FR-003: Create achievement (Mahasiswa)
 		auth.POST("/", s.CreateAchievement)
 
-		// FR-04: Submit achievement for verification
+		// FR-004: Submit draft for verification (Mahasiswa)
 		auth.POST("/:id/submit", s.SubmitForVerification)
 
-		// FR-05: Delete achievement (soft delete, hanya status draft)
+		// FR-005: Delete draft (Mahasiswa)
 		auth.DELETE("/:id", s.DeleteAchievement)
 
-		// FR-06: List achievements milik mahasiswa yang login
+		// FR-006: List achievements
+		// - Mahasiswa: prestasi sendiri
+		// - Dosen wali: prestasi mahasiswa bimbingan
 		auth.GET("/", s.GetAchievementsByStudent)
+
+		// FR-007: Verify achievement (Dosen Wali)
+		// Sesuai SRS: POST /api/v1/achievements/:id/verify
+		auth.POST("/:id/verify", s.VerifyAchievement)
 	}
 }
