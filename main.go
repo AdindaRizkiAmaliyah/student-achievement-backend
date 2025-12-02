@@ -32,16 +32,19 @@ func main() {
 	userRepo := repository.NewUserRepository(dbConn.Postgres)
 	achievementRepo := repository.NewAchievementRepository(dbConn.Postgres, dbConn.Mongo)
 	lecturerRepo := repository.NewLecturerRepository(dbConn.Postgres)
+	userAdminRepo := repository.NewUserAdminRepository(dbConn.Postgres)
 
 	// SERVICE LAYER
 	authService := service.NewAuthService(userRepo)
 	achievementService := service.NewAchievementService(achievementRepo, lecturerRepo)
+	adminService := service.NewAdminService(userAdminRepo)
 
 	// ROUTES
 	r := gin.Default()
 
 	routes.AuthRoutes(r, authService)
 	routes.AchievementRoutes(r, achievementService)
+	routes.AdminRoutes(r, adminService)
 
 	// Root endpoint (opsional)
 	r.GET("/", func(c *gin.Context) {
