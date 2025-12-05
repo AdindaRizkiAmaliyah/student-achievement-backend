@@ -30,6 +30,7 @@ type AchievementRepository interface {
 	FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error)
 	// FindAll: FR-010 — ambil semua prestasi (opsional filter status + pagination).
 	FindAll(status *string, page, limit int) ([]model.AchievementReference, int64, error)
+	
 }
 
 // UpdateStatusOptions menyimpan opsi tambahan ketika update status prestasi.

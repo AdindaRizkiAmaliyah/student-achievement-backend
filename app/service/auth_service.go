@@ -15,7 +15,10 @@ import (
 
 // AuthService mendefinisikan behavior untuk proses autentikasi (login, refresh, dll).
 type AuthService interface {
-	Login(ctx *gin.Context)
+	Login(ctx *gin.Context)         // POST /api/v1/auth/login
+	RefreshToken(ctx *gin.Context)  // POST /api/v1/auth/refresh
+	Logout(ctx *gin.Context)        // POST /api/v1/auth/logout
+	GetProfile(ctx *gin.Context)    // GET  /api/v1/auth/profile
 }
 
 // authService adalah implementasi konkret AuthService.
@@ -132,4 +135,103 @@ func (s *authService) Login(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK,
 		utils.BuildResponseSuccess("Login berhasil", data))
+}
+// RefreshToken memvalidasi refreshToken dan membuat access token baru.
+func (s *authService) RefreshToken(ctx *gin.Context) {
+	var input struct {
+		RefreshToken string `json:"refreshToken" binding:"required"`
+	}
+
+	if err := ctx.ShouldBindJSON(&input); err != nil {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Input refresh token tidak valid", err.Error(), nil))
+		return
+	}
+
+	claims, err := utils.ValidateToken(input.RefreshToken)
+	if err != nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Refresh token tidak valid atau kedaluwarsa", err.Error(), nil))
+		return
+	}
+
+	newAccessToken, err := utils.GenerateToken(
+		claims.UserID,
+		claims.StudentID,
+		claims.Role,
+		claims.Permissions,
+	)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal membuat token baru", err.Error(), nil))
+		return
+	}
+
+	data := map[string]any{
+		"token":        newAccessToken,
+		"refreshToken": input.RefreshToken,
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Token berhasil diperbarui", data))
+}
+
+// Logout mengembalikan respon sukses (JWT tetap stateless).
+func (s *authService) Logout(ctx *gin.Context) {
+	// Implementasi stateless: client cukup menghapus token dari storage.
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Logout berhasil, silakan hapus token di sisi client", nil))
+}
+
+// GetProfile mengembalikan profil user berdasarkan klaim JWT.
+func (s *authService) GetProfile(ctx *gin.Context) {
+	v, ok := ctx.Get("userID")
+	if !ok {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("User belum terautentikasi", "no_user_id", nil))
+		return
+	}
+	userID, ok := v.(uuid.UUID)
+	if !ok || userID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Klaim token tidak valid", "invalid_user_id", nil))
+		return
+	}
+
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("User tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	var studentProfile any
+	if user.Role.Name == "mahasiswa" {
+		if sp, err := s.userRepo.FindStudentByUserID(user.ID); err == nil && sp != nil {
+			studentProfile = map[string]any{
+				"id":           sp.ID,
+				"studentId":    sp.StudentID,
+				"programStudy": sp.ProgramStudy,
+				"academicYear": sp.AcademicYear,
+			}
+		}
+	}
+
+	var perms []string
+	for _, p := range user.Role.Permissions {
+		perms = append(perms, p.Name)
+	}
+
+	data := map[string]any{
+		"id":             user.ID,
+		"username":       user.Username,
+		"email":          user.Email,
+		"fullName":       user.FullName,
+		"role":           user.Role.Name,
+		"permissions":    perms,
+		"studentProfile": studentProfile,
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Berhasil mengambil profil", data))
 }

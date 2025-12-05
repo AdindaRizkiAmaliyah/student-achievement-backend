@@ -2,19 +2,20 @@ package routes
 
 import (
 	"student-achievement-backend/app/service"
+	"student-achievement-backend/middleware"
 
 	"github.com/gin-gonic/gin"
 )
 
-// AuthRoutes mendaftarkan semua endpoint autentikasi ke router utama.
+// AuthRoutes mendaftarkan seluruh endpoint /api/v1/auth sesuai SRS.
 func AuthRoutes(r *gin.Engine, s service.AuthService) {
 	g := r.Group("/api/v1/auth")
 
-	// FR-001: Login
-	// Endpoint harus sama dengan SRS: POST /api/v1/auth/login
+	// Endpoint yang tidak membutuhkan JWT.
 	g.POST("/login", s.Login)
+	g.POST("/refresh", s.RefreshToken)
+	g.POST("/logout", s.Logout)
 
-	// Catatan:
-	// - Endpoint lain di SRS: /refresh, /logout, /profile
-	//   bisa ditambahkan nanti ketika fitur tersebut diimplementasikan.
+	// Endpoint yang membutuhkan JWT.
+	g.GET("/profile", middleware.AuthMiddleware(), s.GetProfile)
 }
