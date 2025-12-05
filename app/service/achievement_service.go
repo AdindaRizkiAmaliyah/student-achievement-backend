@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"os"
+	"path/filepath"
 
 	"student-achievement-backend/app/model"
 	"student-achievement-backend/app/repository"
@@ -28,6 +30,16 @@ type AchievementService interface {
 	VerifyAchievement(ctx *gin.Context)
 	// FR-008: RejectAchievement — dosen wali menolak prestasi dengan catatan.
 	RejectAchievement(ctx *gin.Context)
+
+	// --- Tambahan sesuai SRS 5.4 ---
+	// DetailAchievement — GET /api/v1/achievements/:id (detail gabungan Postgres + Mongo).
+	DetailAchievement(ctx *gin.Context)
+	// UpdateAchievement — PUT /api/v1/achievements/:id (update konten, mahasiswa pemilik).
+	UpdateAchievement(ctx *gin.Context)
+	// GetAchievementHistory — GET /api/v1/achievements/:id/history (status history).
+	GetAchievementHistory(ctx *gin.Context)
+	// UploadAttachment — Mahasiswa mengunggah bukti prestasi (file).
+	UploadAttachment(ctx *gin.Context) // POST /api/v1/achievements/:id/attachments
 }
 
 // achievementService adalah implementasi konkret AchievementService.
@@ -286,6 +298,9 @@ func (s *achievementService) buildAchievementListItem(ctx *gin.Context, ref mode
 	if ref.VerifiedBy != nil {
 		item["verifiedBy"] = ref.VerifiedBy
 	}
+	if ref.RejectionNote != nil {
+		item["rejectionNote"] = ref.RejectionNote
+	}
 
 	// Ambil detail dari MongoDB
 	if md, err := s.repo.FindDetailByMongoID(ctx, ref.MongoAchievementID); err == nil && md != nil {
@@ -339,10 +354,6 @@ func (s *achievementService) GetAchievements(ctx *gin.Context) {
 
 	// ================= Dosen Wali =================
 	case "dosen_wali":
-		// Di sini kita asumsi kamu sudah punya mekanisme:
-		// - dari userID dosen wali -> lecturerID -> daftar studentIDs bimbingan.
-		// Karena implementasinya berbeda-beda, aku jelaskan alurnya:
-
 		userID, err := getUserIDFromContext(ctx)
 		if err != nil || userID == uuid.Nil {
 			ctx.JSON(http.StatusUnauthorized,
@@ -572,4 +583,385 @@ func (s *achievementService) RejectAchievement(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK,
 		utils.BuildResponseSuccess("Prestasi berhasil ditolak", nil))
+}
+
+// ===============================================================
+//  DETAIL — SRS 5.4
+//  Endpoint: GET /api/v1/achievements/:id
+//  - Mahasiswa: hanya boleh lihat miliknya
+//  - Dosen wali: hanya prestasi mahasiswa bimbingan
+//  - Admin: boleh semua
+// ===============================================================
+func (s *achievementService) DetailAchievement(ctx *gin.Context) {
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	role := getRoleFromContext(ctx)
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	switch role {
+	case "mahasiswa":
+		studentID, _ := getStudentIDFromContext(ctx)
+		if studentID == uuid.Nil || ref.StudentID != studentID {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Anda tidak berhak melihat prestasi ini", "forbidden", nil))
+			return
+		}
+	case "dosen_wali":
+		userID, _ := getUserIDFromContext(ctx)
+		if userID == uuid.Nil {
+			ctx.JSON(http.StatusUnauthorized,
+				utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
+			return
+		}
+		lecturer, err := s.lecturerRepo.FindByUserID(userID)
+		if err != nil {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Data dosen wali tidak ditemukan", err.Error(), nil))
+			return
+		}
+		ok, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
+		if err != nil || !ok {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Prestasi bukan milik mahasiswa bimbingan Anda", "forbidden", nil))
+			return
+		}
+	case "admin":
+		// admin bebas
+	default:
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Role tidak berhak mengakses detail prestasi", "forbidden", nil))
+		return
+	}
+
+	detail, err := s.repo.FindDetailByMongoID(ctx, ref.MongoAchievementID)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal mengambil detail prestasi", err.Error(), nil))
+		return
+	}
+
+	data := map[string]any{
+		"id":            ref.ID,
+		"studentId":     ref.StudentID,
+		"status":        ref.Status,
+		"submittedAt":   ref.SubmittedAt,
+		"verifiedAt":    ref.VerifiedAt,
+		"verifiedBy":    ref.VerifiedBy,
+		"rejectionNote": ref.RejectionNote,
+		"createdAt":     ref.CreatedAt,
+		"updatedAt":     ref.UpdatedAt,
+		"detail":        detail,
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Berhasil mengambil detail prestasi", data))
+}
+
+// ===============================================================
+//  UPDATE — SRS 5.4
+//  Endpoint: PUT /api/v1/achievements/:id
+//  - Hanya mahasiswa pemilik
+//  - Contoh aturan: hanya boleh edit saat status 'draft'
+// ===============================================================
+func (s *achievementService) UpdateAchievement(ctx *gin.Context) {
+	role := getRoleFromContext(ctx)
+	if role != "mahasiswa" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya mahasiswa yang dapat mengubah prestasi", "forbidden", nil))
+		return
+	}
+
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
+	}
+
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	if ref.StudentID != studentID {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Anda tidak berhak mengubah prestasi ini", "forbidden", nil))
+		return
+	}
+
+	// Di sini kita batasi hanya bisa edit saat status draft (mengikuti pola delete).
+	if ref.Status != "draft" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Prestasi hanya dapat diubah saat status 'draft'", "invalid_status", nil))
+		return
+	}
+
+	var input struct {
+		AchievementType string                   `json:"achievementType" binding:"required"`
+		Title           string                   `json:"title" binding:"required"`
+		Description     string                   `json:"description"`
+		Details         model.AchievementDetails `json:"details"`
+		Tags            []string                 `json:"tags"`
+		Points          int                      `json:"points"`
+		Attachments     []model.Attachment       `json:"attachments"`
+	}
+	if err := ctx.ShouldBindJSON(&input); err != nil {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Input tidak valid", err.Error(), nil))
+		return
+	}
+
+	now := time.Now()
+	mongoUpdate := model.Achievement{
+		StudentID:       ref.StudentID,
+		AchievementType: input.AchievementType,
+		Title:           input.Title,
+		Description:     input.Description,
+		Details:         input.Details,
+		Attachments:     input.Attachments,
+		Tags:            input.Tags,
+		Points:          input.Points,
+		UpdatedAt:       now,
+	}
+
+	if err := s.repo.UpdateContent(ctx, id, &mongoUpdate); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal memperbarui prestasi", err.Error(), nil))
+		return
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Prestasi berhasil diperbarui", nil))
+}
+
+// ===============================================================
+//  HISTORY — SRS 5.4
+//  Endpoint: GET /api/v1/achievements/:id/history
+//  - Mengembalikan timeline status berdasarkan kolom created/submitted/verified/dll.
+// ===============================================================
+func (s *achievementService) GetAchievementHistory(ctx *gin.Context) {
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	role := getRoleFromContext(ctx)
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+
+	// Reuse rules autorisasi sama seperti DetailAchievement
+	switch role {
+	case "mahasiswa":
+		studentID, _ := getStudentIDFromContext(ctx)
+		if studentID == uuid.Nil || ref.StudentID != studentID {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Anda tidak berhak melihat riwayat prestasi ini", "forbidden", nil))
+			return
+		}
+	case "dosen_wali":
+		userID, _ := getUserIDFromContext(ctx)
+		if userID == uuid.Nil {
+			ctx.JSON(http.StatusUnauthorized,
+				utils.BuildResponseFailed("Autentikasi dosen wali diperlukan", "no_user_id", nil))
+			return
+		}
+		lecturer, err := s.lecturerRepo.FindByUserID(userID)
+		if err != nil {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Data dosen wali tidak ditemukan", err.Error(), nil))
+			return
+		}
+		ok, err := s.lecturerRepo.IsAdvisorOf(lecturer.ID, ref.StudentID)
+		if err != nil || !ok {
+			ctx.JSON(http.StatusForbidden,
+				utils.BuildResponseFailed("Prestasi bukan milik mahasiswa bimbingan Anda", "forbidden", nil))
+			return
+		}
+	case "admin":
+		// no restriction
+	default:
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Role tidak berhak mengakses riwayat prestasi", "forbidden", nil))
+		return
+	}
+
+	events := []map[string]any{
+		{
+			"status": "created",
+			"at":     ref.CreatedAt,
+		},
+	}
+
+	if ref.SubmittedAt != nil {
+		events = append(events, map[string]any{
+			"status": "submitted",
+			"at":     ref.SubmittedAt,
+		})
+	}
+	if ref.VerifiedAt != nil && ref.Status == "verified" {
+		events = append(events, map[string]any{
+			"status": "verified",
+			"at":     ref.VerifiedAt,
+		})
+	}
+	if ref.VerifiedAt != nil && ref.Status == "rejected" {
+		events = append(events, map[string]any{
+			"status": "rejected",
+			"at":     ref.VerifiedAt,
+			"note":   ref.RejectionNote,
+		})
+	}
+	if ref.Status == "deleted" {
+		events = append(events, map[string]any{
+			"status": "deleted",
+			"at":     ref.UpdatedAt, // kita pakai updatedAt sebagai indikasi delete
+		})
+	}
+
+	data := map[string]any{
+		"id":            ref.ID,
+		"studentId":     ref.StudentID,
+		"currentStatus": ref.Status,
+		"events":        events,
+	}
+
+	ctx.JSON(http.StatusOK,
+		utils.BuildResponseSuccess("Berhasil mengambil riwayat status prestasi", data))
+}
+
+// UploadAttachment menangani upload bukti prestasi (file) oleh mahasiswa.
+// Endpoint: POST /api/v1/achievements/:id/attachments
+// - Body: multipart/form-data dengan key "file" (tipe File).
+// - Optional field: "fileType" (string), "description" kalau nanti mau dipakai.
+// - Hanya boleh diakses oleh pemilik prestasi (role: mahasiswa).
+func (s *achievementService) UploadAttachment(ctx *gin.Context) {
+	// Pastikan role adalah mahasiswa.
+	role := getRoleFromContext(ctx)
+	if role != "mahasiswa" {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Hanya mahasiswa yang dapat mengunggah lampiran", "forbidden", nil))
+		return
+	}
+
+	// Ambil studentID dari token.
+	studentID, err := getStudentIDFromContext(ctx)
+	if err != nil || studentID == uuid.Nil {
+		ctx.JSON(http.StatusUnauthorized,
+			utils.BuildResponseFailed("Autentikasi mahasiswa diperlukan", "no_student_id", nil))
+		return
+	}
+
+	// Ambil ID achievement dari path param.
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("ID prestasi diperlukan", "missing_id", nil))
+		return
+	}
+
+	// Pastikan achievement ada dan memang milik mahasiswa ini.
+	ref, err := s.repo.FindByID(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound,
+			utils.BuildResponseFailed("Prestasi tidak ditemukan", err.Error(), nil))
+		return
+	}
+	if ref.StudentID != studentID {
+		ctx.JSON(http.StatusForbidden,
+			utils.BuildResponseFailed("Anda tidak berhak menambahkan lampiran ke prestasi ini", "forbidden", nil))
+		return
+	}
+	if ref.Status == "deleted" {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("Prestasi yang sudah dihapus tidak dapat diberi lampiran", "invalid_status", nil))
+		return
+	}
+
+	// Ambil file dari form-data (key: "file").
+	fileHeader, err := ctx.FormFile("file")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest,
+			utils.BuildResponseFailed("File lampiran wajib diunggah (field 'file')", err.Error(), nil))
+		return
+	}
+
+	// Optional: tipe file (misalnya "certificate", "photo", dll).
+	fileType := ctx.PostForm("fileType")
+	if fileType == "" {
+		// default: pakai ekstensi sebagai tipe kasar.
+		fileType = filepath.Ext(fileHeader.Filename)
+		if len(fileType) > 0 && fileType[0] == '.' {
+			fileType = fileType[1:]
+		}
+	}
+
+	// Tentukan direktori penyimpanan lokal.
+	// Contoh: ./uploads/achievements/<achievementID>/
+	baseDir := "uploads"
+	destDir := filepath.Join(baseDir, "achievements", id)
+
+	if err := os.MkdirAll(destDir, os.ModePerm); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menyiapkan direktori upload", err.Error(), nil))
+		return
+	}
+
+	// Buat nama file unik agar tidak bentrok.
+	now := time.Now()
+	filename := strconv.FormatInt(now.UnixNano(), 10) + "_" + fileHeader.Filename
+	fullPath := filepath.Join(destDir, filename)
+
+	// Simpan file ke disk.
+	if err := ctx.SaveUploadedFile(fileHeader, fullPath); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menyimpan file upload", err.Error(), nil))
+		return
+	}
+
+	// URL/relative path yang disimpan di Mongo (nanti bisa diserve via static files kalau mau).
+	fileURL := "/" + filepath.ToSlash(filepath.Join(baseDir, "achievements", id, filename))
+
+	// Bentuk objek attachment sesuai SRS.
+	attachment := model.Attachment{
+		FileName:   fileHeader.Filename,
+		FileURL:    fileURL,
+		FileType:   fileType,
+		UploadedAt: now,
+	}
+
+	// Simpan ke MongoDB (append ke array attachments).
+	if err := s.repo.AddAttachment(context.Background(), id, attachment); err != nil {
+		ctx.JSON(http.StatusInternalServerError,
+			utils.BuildResponseFailed("Gagal menyimpan lampiran ke database", err.Error(), nil))
+		return
+	}
+
+	// Response sukses berisi data attachment yang baru dibuat.
+	ctx.JSON(http.StatusCreated,
+		utils.BuildResponseSuccess("Lampiran berhasil diunggah", attachment))
 }

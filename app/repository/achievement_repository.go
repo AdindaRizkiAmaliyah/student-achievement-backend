@@ -8,11 +8,11 @@ import (
 
 	"student-achievement-backend/app/model"
 
+	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gorm.io/gorm"
-	"github.com/google/uuid"
 )
 
 // AchievementRepository mendefinisikan operasi data prestasi
@@ -30,7 +30,11 @@ type AchievementRepository interface {
 	FindDetailByMongoID(ctx context.Context, mongoID string) (*model.Achievement, error)
 	// FindAll: FR-010 — ambil semua prestasi (opsional filter status + pagination).
 	FindAll(status *string, page, limit int) ([]model.AchievementReference, int64, error)
-	
+
+	// UpdateContent: UPDATE isi prestasi di MongoDB (title, description, details, dll) + updated_at di Postgres.
+	UpdateContent(ctx context.Context, id string, mongoData *model.Achievement) error
+	// AddAttachment: menambahkan satu attachment ke dokumen achievement di MongoDB.
+	AddAttachment(ctx context.Context, achievementID string, attachment model.Attachment) error
 }
 
 // UpdateStatusOptions menyimpan opsi tambahan ketika update status prestasi.
@@ -101,16 +105,22 @@ func (r *achievementRepository) Create(ctx context.Context, pgData *model.Achiev
 // FindByID mengambil 1 reference prestasi berdasarkan id UUID (Postgres).
 func (r *achievementRepository) FindByID(id string) (*model.AchievementReference, error) {
 	var ref model.AchievementReference
+
+	// Kita hanya preload Verifier (User yang memverifikasi),
+	// karena relasi Student belum kita definisikan dengan benar di model
+	// dan di seluruh flow kita hanya butuh StudentID, bukan objek Student-nya.
 	err := r.pgDB.
-		Preload("Student").
 		Preload("Verifier").
 		Where("id = ?", id).
 		First(&ref).Error
+
 	if err != nil {
 		return nil, err
 	}
+
 	return &ref, nil
 }
+
 
 // UpdateStatus mengubah status prestasi dan field-field terkait.
 func (r *achievementRepository) UpdateStatus(id string, status string, opts UpdateStatusOptions) error {
@@ -267,4 +277,71 @@ func (r *achievementRepository) FindAll(status *string, page, limit int) ([]mode
 		Find(&refs).Error
 
 	return refs, total, err
+}
+
+// UpdateContent melakukan UPDATE konten prestasi di MongoDB lalu update updated_at di Postgres.
+func (r *achievementRepository) UpdateContent(ctx context.Context, id string, mongoData *model.Achievement) error {
+	// Ambil reference untuk mendapatkan mongo_achievement_id
+	var ref model.AchievementReference
+	if err := r.pgDB.Where("id = ?", id).First(&ref).Error; err != nil {
+		return err
+	}
+
+	objID, err := primitive.ObjectIDFromHex(ref.MongoAchievementID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+
+	// Siapkan dokumen update Mongo (field yang boleh diubah mahasiswa)
+	updateDoc := bson.M{
+		"achievementType": mongoData.AchievementType,
+		"title":           mongoData.Title,
+		"description":     mongoData.Description,
+		"details":         mongoData.Details,
+		"attachments":     mongoData.Attachments,
+		"tags":            mongoData.Tags,
+		"points":          mongoData.Points,
+		"updatedAt":       now,
+	}
+
+	if _, err := r.mongoDB.Collection("achievements").
+		UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": updateDoc}); err != nil {
+		return fmt.Errorf("mongo update error: %w", err)
+	}
+
+	// Update updated_at di Postgres
+	return r.pgDB.Model(&model.AchievementReference{}).
+		Where("id = ?", id).
+		Update("updated_at", now).Error
+}
+
+// AddAttachment menambahkan satu attachment ke dokumen achievement di MongoDB
+// berdasarkan ID achievement di PostgreSQL (achievement_references.id).
+func (r *achievementRepository) AddAttachment(
+	ctx context.Context,
+	achievementID string,
+	attachment model.Attachment,
+) error {
+	// 1. Ambil reference di Postgres untuk mendapatkan mongoAchievementID.
+	var ref model.AchievementReference
+	if err := r.pgDB.Where("id = ?", achievementID).First(&ref).Error; err != nil {
+		return err // achievement tidak ditemukan di Postgres
+	}
+
+	// 2. Konversi mongoAchievementID (hex string) ke ObjectID.
+	objID, err := primitive.ObjectIDFromHex(ref.MongoAchievementID)
+	if err != nil {
+		return err
+	}
+
+	// 3. Push attachment baru ke array attachments di dokumen Mongo.
+	_, err = r.mongoDB.Collection("achievements").UpdateOne(
+		ctx,
+		bson.M{"_id": objID, "deleted": bson.M{"$ne": true}},
+		bson.M{"$push": bson.M{"attachments": attachment}},
+	)
+
+	return err
 }

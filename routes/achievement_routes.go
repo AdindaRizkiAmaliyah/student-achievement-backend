@@ -22,6 +22,22 @@ func AchievementRoutes(r *gin.Engine, s service.AchievementService) {
 		g.POST("/", s.CreateAchievement)
 
 		// -----------------------------------------------------------
+		// DETAIL: SRS 5.4
+		// GET /api/v1/achievements/:id
+		// - Mahasiswa: hanya miliknya
+		// - Dosen wali: mahasiswa bimbingan
+		// - Admin: semua
+		// -----------------------------------------------------------
+		g.GET("/:id", s.DetailAchievement)
+
+		// -----------------------------------------------------------
+		// UPDATE: SRS 5.4
+		// PUT /api/v1/achievements/:id
+		// - Mahasiswa pemilik, biasanya hanya saat status 'draft'
+		// -----------------------------------------------------------
+		g.PUT("/:id", s.UpdateAchievement)
+
+		// -----------------------------------------------------------
 		// FR-004: Mahasiswa submit prestasi draft
 		// POST /api/v1/achievements/:id/submit
 		// -----------------------------------------------------------
@@ -55,5 +71,19 @@ func AchievementRoutes(r *gin.Engine, s service.AchievementService) {
 		// POST /api/v1/achievements/:id/reject
 		// -----------------------------------------------------------
 		g.POST("/:id/reject", s.RejectAchievement)
+
+		// -----------------------------------------------------------
+		// HISTORY: SRS 5.4
+		// GET /api/v1/achievements/:id/history
+		// - Mengembalikan timeline status (created, submitted, verified, rejected, deleted)
+		// -----------------------------------------------------------
+		g.GET("/:id/history", s.GetAchievementHistory)
+
+		// -----------------------------------------------------------
+		// Upload attachments bukti prestasi (Mahasiswa)
+		// POST /api/v1/achievements/:id/attachments
+		// Body: multipart/form-data (file di field "file")
+		// -----------------------------------------------------------
+		g.POST("/:id/attachments", s.UploadAttachment)
 	}
 }
