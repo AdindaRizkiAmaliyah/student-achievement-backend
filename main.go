@@ -13,6 +13,12 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// main adalah entrypoint aplikasi:
+// - load .env
+// - init PostgreSQL + MongoDB
+// - seed roles & users default
+// - inisialisasi repository, service, dan routes
+// - menjalankan HTTP server Gin
 func main() {
 
 	// =================================================================
@@ -37,16 +43,17 @@ func main() {
 	database.SeedUsers(dbConn.Postgres)
 
 	// =================================================================
-	// REPOSITORIES
+	// REPOSITORIES (akses data ke DB)
 	// =================================================================
 	userRepo := repository.NewUserRepository(dbConn.Postgres)
 	achievementRepo := repository.NewAchievementRepository(dbConn.Postgres, dbConn.Mongo)
+	studentRepo := repository.NewStudentRepository(dbConn.Postgres)
 	lecturerRepo := repository.NewLecturerRepository(dbConn.Postgres)
 	adminRepo := repository.NewUserAdminRepository(dbConn.Postgres)
 	reportRepo := repository.NewReportRepository(dbConn.Mongo)
 
 	// =================================================================
-	// SERVICES
+	// SERVICES (logic & handler HTTP)
 	// =================================================================
 	authService := service.NewAuthService(userRepo)
 	adminService := service.NewAdminService(adminRepo)
@@ -56,25 +63,33 @@ func main() {
 		lecturerRepo,
 	)
 	reportService := service.NewReportService(reportRepo, lecturerRepo)
+	// StudentService butuh studentRepo + achievementRepo
+	studentService := service.NewStudentService(studentRepo, achievementRepo)
+	// LecturerService versi kamu saat ini hanya butuh lecturerRepo
+	lecturerService := service.NewLecturerService(lecturerRepo)
 
 	// =================================================================
-	// ROUTER
+	// ROUTER (registrasi endpoint sesuai SRS)
 	// =================================================================
 	r := gin.Default()
 
-	// Auth (FR-001)
+	// 5.1 Authentication
 	routes.AuthRoutes(r, authService)
 
-	// Admin user management (FR-009)
+	// 5.2 Users (Admin)
 	routes.AdminRoutes(r, adminService)
 
-	// Achievements (FR-003 s.d. FR-010)
+	// 5.4 Achievements
 	routes.AchievementRoutes(r, achievementService)
 
-	// Reports & Analytics (FR-011)
+	// 5.8 Reports & Analytics
 	routes.ReportRoutes(r, reportService)
 
-	// Root endpoint (optional)
+	// 5.5 Students & Lecturers
+	routes.StudentRoutes(r, studentService)
+	routes.LecturerRoutes(r, lecturerService)
+
+	// Root endpoint (optional health check)
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"message": "Student Achievement API RUNNING",

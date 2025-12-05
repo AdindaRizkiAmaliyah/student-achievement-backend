@@ -19,6 +19,5 @@ func AdminRoutes(r *gin.Engine, s service.AdminService) {
 		admin.DELETE("/users/:id", s.DeleteUser)
 		admin.PUT("/users/:id/role", s.UpdateUserRole)
 
-		admin.PUT("/students/:id/advisor", s.SetStudentAdvisor)
 	}
 }

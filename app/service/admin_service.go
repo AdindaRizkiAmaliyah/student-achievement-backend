@@ -20,7 +20,7 @@ type AdminService interface {
 	GetAllUsers(ctx *gin.Context)
 	GetUserDetail(ctx *gin.Context)
 	UpdateUserRole(ctx *gin.Context)
-	SetStudentAdvisor(ctx *gin.Context)
+	// ❌ SetStudentAdvisor dihapus — sekarang dihandle oleh StudentService (PUT /api/v1/students/:id/advisor)
 }
 
 type adminService struct {
@@ -96,11 +96,11 @@ func (s *adminService) CreateUser(ctx *gin.Context) {
 		sp := model.Student{
 			ID:           uuid.New(),
 			UserID:       user.ID,
-			StudentID:    input.StudentProfile.StudentID,   // ⬅️ ini isi student_id (NIM)
+			StudentID:    input.StudentProfile.StudentID, // NIM
 			ProgramStudy: input.StudentProfile.ProgramStudy,
 			AcademicYear: input.StudentProfile.AcademicYear,
 		}
-		s.repo.CreateStudentProfile(&sp)
+		_ = s.repo.CreateStudentProfile(&sp)
 	}
 
 	// Jika role dosen wali → create profile lecturer
@@ -111,7 +111,7 @@ func (s *adminService) CreateUser(ctx *gin.Context) {
 			LecturerID: input.LecturerProfile.LecturerID,
 			Department: input.LecturerProfile.Department,
 		}
-		s.repo.CreateLecturerProfile(&lp)
+		_ = s.repo.CreateLecturerProfile(&lp)
 	}
 
 	ctx.JSON(http.StatusCreated,
@@ -153,7 +153,7 @@ func (s *adminService) UpdateUser(ctx *gin.Context) {
 		user.Email = input.Email
 	}
 
-	s.repo.UpdateUser(user)
+	_ = s.repo.UpdateUser(user)
 
 	ctx.JSON(http.StatusOK,
 		utils.BuildResponseSuccess("User berhasil diperbarui", user))
@@ -248,35 +248,4 @@ func (s *adminService) UpdateUserRole(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK,
 		utils.BuildResponseSuccess("Role user berhasil diperbarui", nil))
-}
-
-// FR-009: Set advisor mahasiswa
-func (s *adminService) SetStudentAdvisor(ctx *gin.Context) {
-
-	if !ensureAdmin(ctx) {
-		return
-	}
-
-	studentID := uuid.MustParse(ctx.Param("id"))
-
-	var body struct {
-		AdvisorID string `json:"advisorId" binding:"required"`
-	}
-
-	if err := ctx.ShouldBindJSON(&body); err != nil {
-		ctx.JSON(http.StatusBadRequest,
-			utils.BuildResponseFailed("Input tidak valid", err.Error(), nil))
-		return
-	}
-
-	advisorUUID := uuid.MustParse(body.AdvisorID)
-
-	if err := s.repo.SetStudentAdvisor(studentID, advisorUUID); err != nil {
-		ctx.JSON(http.StatusInternalServerError,
-			utils.BuildResponseFailed("Gagal mengubah dosen wali mahasiswa", err.Error(), nil))
-		return
-	}
-
-	ctx.JSON(http.StatusOK,
-		utils.BuildResponseSuccess("Dosen wali berhasil diperbarui", nil))
 }

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	// "golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -21,7 +20,7 @@ type UserAdminRepository interface {
 	CreateStudentProfile(s *model.Student) error
 	CreateLecturerProfile(l *model.Lecturer) error
 
-	SetStudentAdvisor(studentID uuid.UUID, advisorID uuid.UUID) error
+	// ❌ SetStudentAdvisor dihapus karena sekarang ada di StudentService + StudentRepository
 }
 
 type userAdminRepository struct {
@@ -81,11 +80,4 @@ func (r *userAdminRepository) CreateStudentProfile(s *model.Student) error {
 // CreateLecturerProfile → buat profil dosen wali
 func (r *userAdminRepository) CreateLecturerProfile(l *model.Lecturer) error {
 	return r.db.Create(l).Error
-}
-
-// SetStudentAdvisor → FR-009: admin memilih dosen wali untuk mahasiswa
-func (r *userAdminRepository) SetStudentAdvisor(studentID uuid.UUID, advisorID uuid.UUID) error {
-	return r.db.Model(&model.Student{}).
-		Where("id = ?", studentID).
-		Update("advisor_id", advisorID).Error
 }
